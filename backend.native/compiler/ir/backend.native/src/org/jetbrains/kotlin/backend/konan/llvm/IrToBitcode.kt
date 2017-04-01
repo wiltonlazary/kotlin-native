@@ -16,16 +16,9 @@
 
 package org.jetbrains.kotlin.backend.konan.llvm
 
-import debugInfo.DIScopeDump
 import debugInfo.DIScopeOpaqueRef
-import debugInfo.LLVMBuilderRef
-import debugInfo.LLVMBuilderSetDebugLocation
 import kotlinx.cinterop.*
 import llvm.*
-import llvm.LLVMBasicBlockRef
-import llvm.LLVMLinkage
-import llvm.LLVMModuleRef
-import llvm.LLVMTypeKind
 import org.jetbrains.kotlin.backend.common.descriptors.allParameters
 import org.jetbrains.kotlin.backend.konan.Context
 import org.jetbrains.kotlin.backend.konan.KonanConfigKeys
@@ -543,9 +536,14 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
         if (declaration.descriptor.isExternal)                    return
         if (body == null)                                         return
 
+        val line = declaration.line()
+        val column = declaration.column()
         using(FunctionScope(declaration)) {
-            debugLocation(declaration)
-            codegen.prologue(declaration.descriptor)
+            val diScope       = declaration.scope()
+            codegen.prologue(descriptor = declaration.descriptor,
+                             line       = line,
+                             column     = column,
+                             scope      = diScope)
 
             using(VariableScope()) {
                 when (body) {
@@ -562,7 +560,7 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
                     codegen.unreachable()
             }
 
-            codegen.epilogue()
+            codegen.epilogue(line, column, diScope)
         }
 
         if (context.shouldVerifyBitCode())
@@ -1583,8 +1581,10 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
 
             value.descriptor is FunctionDescriptor -> {
                 debugLocation(value)
-                return evaluateFunctionCall(
+                val v = evaluateFunctionCall(
                         value as IrCall, args, resultLifetime(value))
+                codegen.resetDebugLocation()
+                return v
             }
             else -> {
                 TODO(ir2string(value))
@@ -1595,33 +1595,34 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
     private fun debugLocation(element: IrElement) {
         currentFile?.apply {
             val functionScope = currentCodeContext.functionScope() as? FunctionScope ?: return
-            val scope = functionScope.declaration ?: return
-            val diScope = scope.scope()
+            val scope         = functionScope.declaration ?: return
+            val diScope       = scope.scope()
             try {
-                //chk(scope.descriptor, diScope)
                 @Suppress("UNCHECKED_CAST")
-                (DIScopeDump(diScope as DIScopeOpaqueRef))
-                val col = fileEntry.getColumnNumber(element.startOffset)
-                @Suppress("UNCHECKED_CAST")
-                (LLVMBuilderSetDebugLocation(
-                        codegen.builder as LLVMBuilderRef,
-                        fileEntry.getLineNumber(element.startOffset),
-                        if (col < 0) 0 else col,
-                        diScope as DIScopeOpaqueRef))
-                //qchk(scope.descriptor, diScope)
+                codegen.debugLocation(element.line(), element.column(), diScope as debugInfo.DIScopeOpaqueRef)
             } catch (ignored: Exception) {
             }
         }
     }
 
-    private fun chk(functionDescriptor: FunctionDescriptor, diScope: debugInfo.DISubprogramRef) {
-        @Suppress("UNCHECKED_CAST")
-        val currentFunction = debugInfo.LLVMBuilderGetCurrentFunction(codegen.builder as debugInfo.LLVMBuilderRef)
-        assert(currentFunction == codegen.llvmFunction(functionDescriptor))
-
-        @Suppress("UNCHECKED_CAST")
-        assert(debugInfo.DISubprogramDescribesFunction(diScope, currentFunction as debugInfo.LLVMValueRef) != 0)
+    private fun IrElement.line():Int {
+        try {
+            return currentFile?.fileEntry?.getLineNumber(this.startOffset) ?: -1
+        }
+        catch (ignored: Exception) {
+            return -1
+        }
     }
+
+    private fun IrElement.column():Int {
+        try {
+            return currentFile?.fileEntry?.getColumnNumber(this.startOffset) ?: -1
+        }
+        catch (ignored: Exception) {
+            return -1
+        }
+    }
+
 
     fun IrFile.file():debugInfo.DIFileRef {
         return context.debugInfo.files.getOrPut(this) {
@@ -1634,8 +1635,9 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
     val kDiInt32Type = debugInfo.DICreateBasicType(context.debugInfo.builder, "int", 32, 4, 0) as debugInfo.DITypeOpaqueRef
 
     @Suppress("UNCHECKED_CAST")
-    fun IrFunction.scope():debugInfo.DISubprogramRef {
+    fun IrFunction.scope():debugInfo.DIScopeOpaqueRef? {
         //val descriptor = this.descriptor
+        currentFile?:return null
         return context.debugInfo.subprograms.getOrPut(descriptor) {
             memScoped {
                 val subroutineType = debugInfo.DICreateSubroutineType(context.debugInfo.builder, allocArrayOf(kDiInt32Type), 1)
@@ -1648,7 +1650,7 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
                 debugInfo.DIFunctionAddSubprogram(functionLlvmValue , diFunction)
                 diFunction!!
             }
-        }
+        } as debugInfo.DIScopeOpaqueRef
     }
 
     val IrFunction.line:Int  get() {
