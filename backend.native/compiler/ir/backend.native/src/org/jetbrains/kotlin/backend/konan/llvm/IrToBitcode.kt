@@ -1150,7 +1150,9 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
 
     private fun evaluateGetValue(value: IrGetValue): LLVMValueRef {
         context.log("evaluateGetValue               : ${ir2string(value)}")
-        return currentCodeContext.genGetValue(value.descriptor)
+        return debugInfo(value) {
+            currentCodeContext.genGetValue(value.descriptor)
+        }
     }
 
     //-------------------------------------------------------------------------//
@@ -1159,7 +1161,9 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
         context.log("evaluateSetVariable            : ${ir2string(value)}")
         val result = evaluateExpression(value.value)
         val variable = currentCodeContext.getDeclaredVariable(value.descriptor)
-        codegen.vars.store(result, variable)
+        debugInfo(value) {
+            codegen.vars.store(result, variable)
+        }
 
         assert(value.type.isUnit())
         return codegen.theUnitInstanceRef.llvm
@@ -1208,14 +1212,16 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
         val type = value.typeOperand
         assert(type.isPrimitiveInteger())
         val result = evaluateExpression(value.argument)
-        val llvmSrcType = codegen.getLLVMType(value.argument.type)
-        val llvmDstType = codegen.getLLVMType(type)
-        val srcWidth = LLVMGetIntTypeWidth(llvmSrcType)
-        val dstWidth = LLVMGetIntTypeWidth(llvmDstType)
-        return when {
-            srcWidth == dstWidth           -> result
-            srcWidth > dstWidth            -> LLVMBuildTrunc(codegen.builder, result, llvmDstType, "")!!
-            else /* srcWidth < dstWidth */ -> LLVMBuildSExt(codegen.builder, result, llvmDstType, "")!!
+        return debugInfo(value) {
+            val llvmSrcType = codegen.getLLVMType(value.argument.type)
+            val llvmDstType = codegen.getLLVMType(type)
+            val srcWidth = LLVMGetIntTypeWidth(llvmSrcType)
+            val dstWidth = LLVMGetIntTypeWidth(llvmDstType)
+            return@debugInfo when {
+                srcWidth == dstWidth -> result
+                srcWidth > dstWidth -> LLVMBuildTrunc(codegen.builder, result, llvmDstType, "")!!
+                else /* srcWidth < dstWidth */ -> LLVMBuildSExt(codegen.builder, result, llvmDstType, "")!!
+            }
         }
     }
 
@@ -1304,13 +1310,17 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
         context.log("evaluateGetField               : ${ir2string(value)}")
         if (value.descriptor.dispatchReceiverParameter != null) {
             val thisPtr = evaluateExpression(value.receiver!!)
-            return codegen.loadSlot(
-                    fieldPtrOfClass(thisPtr, value.descriptor), value.descriptor.isVar())
+            return debugInfo(value) {
+                codegen.loadSlot(
+                        fieldPtrOfClass(thisPtr, value.descriptor), value.descriptor.isVar())
+            }
         }
         else {
             assert (value.receiver == null)
             val ptr = context.llvmDeclarations.forStaticField(value.descriptor).storage
-            return codegen.loadSlot(ptr, value.descriptor.isVar())
+            return debugInfo(value) {
+                codegen.loadSlot(ptr, value.descriptor.isVar())
+            }
         }
     }
 
@@ -1334,12 +1344,16 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
 
         if (value.descriptor.dispatchReceiverParameter != null) {
             val thisPtr = evaluateExpression(value.receiver!!)
-            codegen.storeAnyGlobal(valueToAssign, fieldPtrOfClass(thisPtr, value.descriptor))
+            debugInfo(value) {
+                codegen.storeAnyGlobal(valueToAssign, fieldPtrOfClass(thisPtr, value.descriptor))
+            }
         }
         else {
             assert (value.receiver == null)
             val globalValue = context.llvmDeclarations.forStaticField(value.descriptor).storage
-            codegen.storeAnyGlobal(valueToAssign, globalValue)
+            debugInfo(value) {
+                codegen.storeAnyGlobal(valueToAssign, globalValue)
+            }
         }
 
         assert (value.type.isUnit())
