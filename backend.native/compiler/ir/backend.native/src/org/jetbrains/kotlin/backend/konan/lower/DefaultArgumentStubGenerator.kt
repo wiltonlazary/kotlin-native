@@ -35,16 +35,14 @@ import org.jetbrains.kotlin.descriptors.impl.ValueParameterDescriptorImpl
 import org.jetbrains.kotlin.incremental.components.NoLookupLocation
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.builders.*
-import org.jetbrains.kotlin.ir.declarations.IrDeclarationContainer
-import org.jetbrains.kotlin.ir.declarations.IrDeclarationOrigin
-import org.jetbrains.kotlin.ir.declarations.IrDeclarationOriginImpl
-import org.jetbrains.kotlin.ir.declarations.IrFunction
+import org.jetbrains.kotlin.ir.declarations.*
 import org.jetbrains.kotlin.ir.declarations.impl.IrConstructorImpl
 import org.jetbrains.kotlin.ir.declarations.impl.IrFunctionImpl
 import org.jetbrains.kotlin.ir.declarations.impl.IrVariableImpl
 import org.jetbrains.kotlin.ir.descriptors.IrTemporaryVariableDescriptorImpl
 import org.jetbrains.kotlin.ir.expressions.*
 import org.jetbrains.kotlin.ir.expressions.impl.*
+import org.jetbrains.kotlin.ir.util.createParameterDeclarations
 import org.jetbrains.kotlin.ir.util.transformFlat
 import org.jetbrains.kotlin.ir.visitors.IrElementTransformerVoid
 import org.jetbrains.kotlin.ir.visitors.transformChildrenVoid
@@ -55,7 +53,6 @@ import org.jetbrains.kotlin.resolve.descriptorUtil.hasDefaultValue
 import org.jetbrains.kotlin.types.KotlinType
 import org.jetbrains.kotlin.types.typeUtil.builtIns
 import org.jetbrains.kotlin.util.OperatorNameConventions
-import org.jetbrains.kotlin.utils.addToStdlib.singletonList
 
 class DefaultArgumentStubGenerator internal constructor(val context: Context): DeclarationContainerLoweringPass {
     override fun lower(irDeclarationContainer: IrDeclarationContainer) {
@@ -75,14 +72,14 @@ class DefaultArgumentStubGenerator internal constructor(val context: Context): D
         val functionDescriptor = irFunction.descriptor
 
         if (!functionDescriptor.needsDefaultArgumentsLowering)
-            return irFunction.singletonList()
+            return listOf(irFunction)
 
         val bodies = functionDescriptor.valueParameters
                 .mapNotNull{irFunction.getDefault(it)}
 
 
         log("detected ${functionDescriptor.name.asString()} has got #${bodies.size} default expressions")
-        functionDescriptor.overriddenDescriptors.forEach { context.log("DEFAULT-REPLACER: $it") }
+        functionDescriptor.overriddenDescriptors.forEach { context.log{"DEFAULT-REPLACER: $it"} }
         if (bodies.isNotEmpty()) {
             val descriptor = functionDescriptor.generateDefaultsDescription(context)
             log("$functionDescriptor -> $descriptor")
@@ -142,7 +139,7 @@ class DefaultArgumentStubGenerator internal constructor(val context: Context): D
                     + IrDelegatingConstructorCallImpl(
                             startOffset = irFunction.startOffset,
                             endOffset   = irFunction.endOffset,
-                            descriptor  = functionDescriptor
+                            constructorDescriptor = functionDescriptor
                     ).apply {
                         params.forEachIndexed { i, variable ->
                             putValueArgument(i, irGet(variable))
@@ -165,12 +162,9 @@ class DefaultArgumentStubGenerator internal constructor(val context: Context): D
                     })
                 }
             }
-            // Replace default argument initializers with empty composites.
-            functionDescriptor.valueParameters.forEach {
-                if (it.declaresDefaultValue()) {
-                    irFunction.putDefault(it, IrExpressionBodyImpl(irFunction.startOffset, irFunction.endOffset,
-                            IrCompositeImpl(irFunction.startOffset, irFunction.startOffset, it.type)))
-                }
+            // Remove default argument initializers.
+            irFunction.valueParameters.forEach {
+                it.defaultValue = null
             }
             return if (functionDescriptor is ClassConstructorDescriptor)
                       listOf(irFunction, IrConstructorImpl(
@@ -178,20 +172,20 @@ class DefaultArgumentStubGenerator internal constructor(val context: Context): D
                               endOffset   = irFunction.endOffset,
                               descriptor  = descriptor as ClassConstructorDescriptor,
                               origin      = DECLARATION_ORIGIN_FUNCTION_FOR_DEFAULT_PARAMETER,
-                              body        = body))
+                              body        = body).apply { createParameterDeclarations() })
                    else
                       listOf(irFunction, IrFunctionImpl(
                               startOffset = irFunction.startOffset,
                               endOffset   = irFunction.endOffset,
                               descriptor  = descriptor,
                               origin      = DECLARATION_ORIGIN_FUNCTION_FOR_DEFAULT_PARAMETER,
-                              body        = body))
+                              body        = body).apply { createParameterDeclarations() })
         }
-        return irFunction.singletonList()
+        return listOf(irFunction)
     }
 
 
-    private fun log(msg:String) = context.log("DEFAULT-REPLACER: $msg")
+    private fun log(msg:String) = context.log{"DEFAULT-REPLACER: $msg"}
 }
 
 private fun Scope.createTemporaryVariableDescriptor(parameterDescriptor: ValueParameterDescriptor?): VariableDescriptor =
@@ -247,7 +241,7 @@ class DefaultParameterInjector internal constructor(val context: Context): BodyL
                 return IrDelegatingConstructorCallImpl(
                         startOffset = expression.startOffset,
                         endOffset   = expression.endOffset,
-                        descriptor  = descriptorForCall as ClassConstructorDescriptor)
+                        constructorDescriptor = descriptorForCall as ClassConstructorDescriptor)
                             .apply {
                                 params.forEach {
                                     log("call::params@${it.first.index}/${it.first.name.asString()}: ${ir2string(it.second)}")
@@ -274,7 +268,7 @@ class DefaultParameterInjector internal constructor(val context: Context): BodyL
                 return IrCallImpl(
                         startOffset   = expression.startOffset,
                         endOffset     = expression.endOffset,
-                        descriptor    = descriptor,
+                        calleeDescriptor = descriptor,
                         typeArguments = expression.descriptor.typeParameters.map{it to (expression.getTypeArgument(it) ?: it.defaultType) }.toMap())
                         .apply {
                             params.forEach {
@@ -339,7 +333,7 @@ class DefaultParameterInjector internal constructor(val context: Context): BodyL
         })
     }
 
-    private fun log(msg: String) = context.log("DEFAULT-INJECTOR: $msg")
+    private fun log(msg: String) = context.log{"DEFAULT-INJECTOR: $msg"}
 }
 
 private val CallableMemberDescriptor.needsDefaultArgumentsLowering
@@ -411,7 +405,8 @@ private fun FunctionDescriptor.generateDefaultsDescription(context: Context): Fu
                 /* unsubstitutedReturnType       = */ returnType,
                 /* modality                      = */ Modality.FINAL,
                 /* visibility                    = */ this.visibility)
-        context.log("adds to cache[$this] = $descriptor")
+        descriptor.isSuspend = this.isSuspend
+        context.log{"adds to cache[$this] = $descriptor"}
         descriptor
     }
 }

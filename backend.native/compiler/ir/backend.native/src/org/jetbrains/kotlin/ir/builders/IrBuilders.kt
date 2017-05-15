@@ -16,13 +16,15 @@
 
 package org.jetbrains.kotlin.ir.builders
 
-import org.jetbrains.kotlin.descriptors.ValueDescriptor
-import org.jetbrains.kotlin.descriptors.VariableDescriptor
+import org.jetbrains.kotlin.descriptors.*
+import org.jetbrains.kotlin.ir.expressions.IrCall
 import org.jetbrains.kotlin.ir.expressions.IrExpression
 import org.jetbrains.kotlin.ir.expressions.IrLoop
 import org.jetbrains.kotlin.ir.expressions.IrStatementOrigin
 import org.jetbrains.kotlin.ir.expressions.impl.*
 import org.jetbrains.kotlin.types.KotlinType
+import org.jetbrains.kotlin.types.TypeProjectionImpl
+import org.jetbrains.kotlin.types.TypeSubstitutor
 
 inline fun IrBuilderWithScope.irLetSequence(
         value: IrExpression,
@@ -48,5 +50,42 @@ fun IrBuilderWithScope.irContinue(loop: IrLoop) =
 
 fun IrBuilderWithScope.irTrue() = IrConstImpl.boolean(startOffset, endOffset, context.builtIns.booleanType, true)
 
+@Deprecated("Creates unbound symbol")
 fun IrBuilderWithScope.irGet(value: ValueDescriptor) =
         IrGetValueImpl(startOffset, endOffset, value)
+
+@Deprecated("Creates unbound symbol")
+fun IrBuilderWithScope.irGet(receiver: IrExpression?, property: PropertyDescriptor): IrCall =
+        IrCallImpl(startOffset, endOffset, property.getter!!).apply {
+            dispatchReceiver = receiver
+        }
+
+@Deprecated("Creates unbound symbol")
+fun IrBuilderWithScope.irThis() =
+        scope.classOwner().let { classOwner ->
+            IrGetValueImpl(startOffset, endOffset, classOwner.thisAsReceiverParameter)
+        }
+
+@Deprecated("Creates unbound symbol")
+fun IrBuilderWithScope.irSetVar(variable: VariableDescriptor, value: IrExpression) =
+        IrSetVariableImpl(startOffset, endOffset, variable, value, IrStatementOrigin.EQ)
+
+@Deprecated("Creates unbound symbol")
+fun IrBuilderWithScope.irCall(descriptor: FunctionDescriptor): IrCallImpl {
+    return IrCallImpl(this.startOffset, this.endOffset, descriptor)
+}
+
+@Deprecated("Creates unbound symbol")
+fun IrBuilderWithScope.irCall(
+        callee: FunctionDescriptor,
+        typeArguments: Map<TypeParameterDescriptor, KotlinType>
+): IrCallImpl {
+    val substitutionContext = typeArguments.map { (typeParameter, typeArgument) ->
+        typeParameter.typeConstructor to TypeProjectionImpl(typeArgument)
+    }.toMap()
+
+    val substitutor = TypeSubstitutor.create(substitutionContext)
+    val substitutedCallee = callee.substitute(substitutor)!!
+
+    return IrCallImpl(this.startOffset, this.endOffset, substitutedCallee, typeArguments)
+}

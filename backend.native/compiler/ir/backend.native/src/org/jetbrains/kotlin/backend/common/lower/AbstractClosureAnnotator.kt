@@ -16,9 +16,11 @@
 
 package org.jetbrains.kotlin.backend.common.lower
 
+import org.jetbrains.kotlin.backend.common.*
 import org.jetbrains.kotlin.descriptors.*
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.declarations.*
+import org.jetbrains.kotlin.ir.expressions.IrCatch
 import org.jetbrains.kotlin.ir.expressions.IrMemberAccessExpression
 import org.jetbrains.kotlin.ir.expressions.IrValueAccessExpression
 import org.jetbrains.kotlin.ir.visitors.IrElementVisitorVoid
@@ -29,12 +31,6 @@ import org.jetbrains.kotlin.resolve.DescriptorUtils
 // TODO: synchronize with JVM BE
 // TODO: rename the file.
 class Closure(val capturedValues: List<ValueDescriptor> = emptyList())
-
-private fun <E> MutableList<E>.push(element: E) = this.add(element)
-
-private fun <E> MutableList<E>.pop() = this.removeAt(size - 1)
-
-private fun <E> MutableList<E>.peek(): E? = if (size == 0) null else this[size - 1]
 
 class ClosureAnnotator   {
     private val closureBuilders = mutableMapOf<DeclarationDescriptor, ClosureBuilder>()
@@ -170,6 +166,11 @@ class ClosureAnnotator   {
         override fun visitVariable(declaration: IrVariable) {
             closuresStack.peek()?.declareVariable(declaration.descriptor)
             super.visitVariable(declaration)
+        }
+
+        override fun visitCatch(aCatch: IrCatch) {
+            closuresStack.peek()?.declareVariable(aCatch.parameter)
+            super.visitCatch(aCatch)
         }
 
         // Process delegating constructor calls, enum constructor calls, calls and callable references.

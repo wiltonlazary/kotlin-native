@@ -62,14 +62,14 @@ internal class KonanLower(val context: Context) {
         phaser.phase(KonanPhase.LOWER_DELEGATION) {
             PropertyDelegationLowering(context).lower(irFile)
         }
-        phaser.phase(KonanPhase.LOWER_TYPE_OPERATORS) {
-            TypeOperatorLowering(context).runOnFilePostfix(irFile)
-        }
         phaser.phase(KonanPhase.LOWER_LOCAL_FUNCTIONS) {
             LocalDeclarationsLowering(context).runOnFilePostfix(irFile)
         }
         phaser.phase(KonanPhase.LOWER_TAILREC) {
             TailrecLowering(context).runOnFilePostfix(irFile)
+        }
+        phaser.phase(KonanPhase.LOWER_FINALLY) {
+            FinallyBlocksLowering(context).runOnFilePostfix(irFile)
         }
         phaser.phase(KonanPhase.LOWER_DEFAULT_PARAMETER_EXTENT) {
             DefaultArgumentStubGenerator(context).runOnFilePostfix(irFile)
@@ -92,6 +92,12 @@ internal class KonanLower(val context: Context) {
         }
         phaser.phase(KonanPhase.LOWER_VARARG) {
             VarargInjectionLowering(context).runOnFilePostfix(irFile)
+        }
+        phaser.phase(KonanPhase.LOWER_COROUTINES) {
+            SuspendFunctionsLowering(context).runOnFilePostfix(irFile)
+        }
+        phaser.phase(KonanPhase.LOWER_TYPE_OPERATORS) {
+            TypeOperatorLowering(context).runOnFilePostfix(irFile)
         }
         phaser.phase(KonanPhase.BRIDGES_BUILDING) {
             BridgesBuilding(context).runOnFilePostfix(irFile)

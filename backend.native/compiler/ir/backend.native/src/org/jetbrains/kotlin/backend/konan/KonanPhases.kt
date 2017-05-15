@@ -39,15 +39,17 @@ enum class KonanPhase(val description: String,
     /* ... ... */ LOWER_VARARG("Vararg lowering", LOWER_CALLABLES),
     /* ... ... */ LOWER_LOCAL_FUNCTIONS("Local Function Lowering", LOWER_SHARED_VARIABLES),
     /* ... ... */ LOWER_TAILREC("tailrec lowering", LOWER_LOCAL_FUNCTIONS),
+    /* ... ... */ LOWER_FINALLY("Finally blocks lowering", LOWER_INITIALIZERS, LOWER_LOCAL_FUNCTIONS, LOWER_TAILREC),
     /* ... ... */ LOWER_DEFAULT_PARAMETER_EXTENT("Default Parameter Extent Lowering",
                         LOWER_TAILREC, LOWER_ENUMS),
     /* ... ... */ LOWER_INNER_CLASSES("Inner classes lowering", LOWER_DEFAULT_PARAMETER_EXTENT),
     /* ... ... */ LOWER_LATEINIT("Lateinit properties lowering"),
     /* ... ... */ LOWER_BUILTIN_OPERATORS("BuiltIn Operators Lowering", LOWER_DEFAULT_PARAMETER_EXTENT, LOWER_LATEINIT),
-    /* ... ... */ LOWER_TYPE_OPERATORS("Type operators lowering"),
-    /* ... ... */ BRIDGES_BUILDING("Bridges building"),
+    /* ... ... */ LOWER_COROUTINES("Coroutines lowering", LOWER_LOCAL_FUNCTIONS),
+    /* ... ... */ LOWER_TYPE_OPERATORS("Type operators lowering", LOWER_COROUTINES),
+    /* ... ... */ BRIDGES_BUILDING("Bridges building", LOWER_COROUTINES),
     /* ... ... */ LOWER_STRING_CONCAT("String concatenation lowering"),
-    /* ... ... */ AUTOBOX("Autoboxing of primitive types", BRIDGES_BUILDING),
+    /* ... ... */ AUTOBOX("Autoboxing of primitive types", BRIDGES_BUILDING, LOWER_COROUTINES),
     /* ... */ BITCODE("LLVM BitCode Generation"),
     /* ... ... */ RTTI("RTTI Generation"),
     /* ... ... */ CODEGEN("Code Generation"),
@@ -72,10 +74,6 @@ object KonanPhases {
 
     fun config(config: KonanConfig) {
         with (config.configuration) { with (KonanConfigKeys) { 
-
-            // We disable inline IR deserialization
-            // until we have enough test passes.
-            KonanPhase.DESERIALIZER.enabled = false
 
             // Don't serialize anything to a final executable.
             KonanPhase.SERIALIZER.enabled = getBoolean(NOLINK)
@@ -141,6 +139,9 @@ internal class PhaseManager(val context: Context)  {
             }
             if (shouldPrintIr()) {
                 printIr()
+            }
+            if (shouldPrintIrWithDescriptors()) {
+                printIrWithDescriptors()
             }
             if (shouldPrintLocations()) {
                 printLocations()

@@ -16,16 +16,13 @@
 
 package org.jetbrains.kotlin.backend.konan
 
-import llvm.LLVMDumpModule
-import llvm.LLVMModuleRef
+import llvm.*
 import org.jetbrains.kotlin.backend.common.validateIrModule
 import org.jetbrains.kotlin.backend.jvm.descriptors.initialize
 import org.jetbrains.kotlin.backend.konan.descriptors.*
+import org.jetbrains.kotlin.backend.konan.ir.DumpIrTreeWithDescriptorsVisitor
 import org.jetbrains.kotlin.backend.konan.ir.Ir
-import org.jetbrains.kotlin.backend.konan.llvm.Llvm
-import org.jetbrains.kotlin.backend.konan.llvm.LlvmDeclarations
-import org.jetbrains.kotlin.backend.konan.llvm.functionName
-import org.jetbrains.kotlin.backend.konan.llvm.verifyModule
+import org.jetbrains.kotlin.backend.konan.llvm.*
 import org.jetbrains.kotlin.descriptors.*
 import org.jetbrains.kotlin.descriptors.annotations.Annotations
 import org.jetbrains.kotlin.descriptors.impl.PropertyDescriptorImpl
@@ -88,11 +85,11 @@ internal class SpecialDescriptorsFactory(val context: Context) {
         val bridgeDirections = overriddenFunctionDescriptor.bridgeDirections
         return bridgesDescriptors.getOrPut(descriptor to bridgeDirections) {
             SimpleFunctionDescriptorImpl.create(
-                    descriptor.containingDeclaration,
-                    Annotations.EMPTY,
-                    ("<bridge-" + bridgeDirections.toString() + ">" + descriptor.functionName).synthesizedName,
-                    CallableMemberDescriptor.Kind.DECLARATION,
-                    SourceElement.NO_SOURCE).apply {
+                    /* containingDeclaration = */ descriptor.containingDeclaration,
+                    /* annotations           = */ Annotations.EMPTY,
+                    /* name                  = */ "<bridge-$bridgeDirections>${descriptor.functionName}".synthesizedName,
+                    /* kind                  = */ CallableMemberDescriptor.Kind.DECLARATION,
+                    /* source                = */ SourceElement.NO_SOURCE).apply {
                 initializeBridgeDescriptor(this, descriptor, bridgeDirections.array)
             }
         }
@@ -120,31 +117,34 @@ internal class SpecialDescriptorsFactory(val context: Context) {
             BridgeDirection.FROM_VALUE_TYPE -> context.builtIns.anyType
         }
 
+        val valueParameters = descriptor.valueParameters.mapIndexed { index, valueParameterDescriptor ->
+            when (bridgeDirections[index + 2]) {
+                BridgeDirection.TO_VALUE_TYPE -> valueParameterDescriptor
+                BridgeDirection.NOT_NEEDED -> valueParameterDescriptor
+                BridgeDirection.FROM_VALUE_TYPE -> ValueParameterDescriptorImpl(
+                        containingDeclaration = valueParameterDescriptor.containingDeclaration,
+                        original              = null,
+                        index                 = index,
+                        annotations           = Annotations.EMPTY,
+                        name                  = valueParameterDescriptor.name,
+                        outType               = context.builtIns.anyType,
+                        declaresDefaultValue  = valueParameterDescriptor.declaresDefaultValue(),
+                        isCrossinline         = valueParameterDescriptor.isCrossinline,
+                        isNoinline            = valueParameterDescriptor.isNoinline,
+                        varargElementType     = valueParameterDescriptor.varargElementType,
+                        source                = SourceElement.NO_SOURCE)
+            }
+        }
         bridgeDescriptor.initialize(
-                extensionReceiverType,
-                descriptor.dispatchReceiverParameter,
-                descriptor.typeParameters,
-                descriptor.valueParameters.mapIndexed { index, valueParameterDescriptor ->
-                    when (bridgeDirections[index + 2]) {
-                        BridgeDirection.TO_VALUE_TYPE -> valueParameterDescriptor
-                        BridgeDirection.NOT_NEEDED -> valueParameterDescriptor
-                        BridgeDirection.FROM_VALUE_TYPE -> ValueParameterDescriptorImpl(
-                                valueParameterDescriptor.containingDeclaration,
-                                null,
-                                index,
-                                Annotations.EMPTY,
-                                valueParameterDescriptor.name,
-                                context.builtIns.anyType,
-                                valueParameterDescriptor.declaresDefaultValue(),
-                                valueParameterDescriptor.isCrossinline,
-                                valueParameterDescriptor.isNoinline,
-                                valueParameterDescriptor.varargElementType,
-                                SourceElement.NO_SOURCE)
-                    }
-                },
-                returnType,
-                descriptor.modality,
-                descriptor.visibility)
+                /* receiverParameterType        = */ extensionReceiverType,
+                /* dispatchReceiverParameter    = */ descriptor.dispatchReceiverParameter,
+                /* typeParameters               = */ descriptor.typeParameters,
+                /* unsubstitutedValueParameters = */ valueParameters,
+                /* unsubstitutedReturnType      = */ returnType,
+                /* modality                     = */ descriptor.modality,
+                /* visibility                   = */ descriptor.visibility).apply {
+            isSuspend                           =    descriptor.isSuspend
+        }
     }
 }
 
@@ -265,6 +265,7 @@ internal class Context(config: KonanConfig) : KonanBackendContext(config) {
             field = module!!
 
             llvm = Llvm(this, module)
+            debugInfo = DebugInfo(this)
         }
 
     lateinit var llvm: Llvm
@@ -300,6 +301,12 @@ internal class Context(config: KonanConfig) : KonanBackendContext(config) {
         irModule!!.accept(DumpIrTreeVisitor(out), "")
     }
 
+    fun printIrWithDescriptors() {
+        if (irModule == null) return
+        separator("IR after: ${phase?.description}")
+        irModule!!.accept(DumpIrTreeWithDescriptorsVisitor(out), "")
+    }
+
     fun printLocations() {
         if (irModule == null) return
         separator("Locations after: ${phase?.description}")
@@ -317,7 +324,8 @@ internal class Context(config: KonanConfig) : KonanBackendContext(config) {
 
                     override fun visitFunction(declaration: IrFunction) {
                         super.visitFunction(declaration)
-                        println("${declaration.descriptor.fqNameOrNull()}: ${fileEntry.range(declaration)}")
+                        val descriptor = declaration.descriptor
+                        println("${descriptor.fqNameOrNull()?: descriptor.name}: ${fileEntry.range(declaration)}")
                     }
                 })
             }
@@ -383,6 +391,10 @@ internal class Context(config: KonanConfig) : KonanBackendContext(config) {
         return config.configuration.getBoolean(KonanConfigKeys.PRINT_IR) 
     }
 
+    fun shouldPrintIrWithDescriptors(): Boolean {
+        return config.configuration.getBoolean(KonanConfigKeys.PRINT_IR_WITH_DESCRIPTORS)
+    }
+
     fun shouldPrintBitCode(): Boolean {
         return config.configuration.getBoolean(KonanConfigKeys.PRINT_BITCODE) 
     }
@@ -395,10 +407,16 @@ internal class Context(config: KonanConfig) : KonanBackendContext(config) {
         return config.configuration.getBoolean(KonanConfigKeys.TIME_PHASES) 
     }
 
-    fun log(message: String) {
+    fun shouldContainDebugInfo(): Boolean {
+        return config.configuration.getBoolean(KonanConfigKeys.DEBUG)
+    }
+
+    fun log(message: () -> String) {
         if (phase?.verbose ?: false) {
-            println(message)
+            println(message())
         }
     }
+
+    lateinit var debugInfo:DebugInfo
 }
 

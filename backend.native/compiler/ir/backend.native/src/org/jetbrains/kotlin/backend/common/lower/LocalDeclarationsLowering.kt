@@ -21,18 +21,14 @@ import org.jetbrains.kotlin.backend.common.DeclarationContainerLoweringPass
 import org.jetbrains.kotlin.backend.konan.descriptors.synthesizedName
 import org.jetbrains.kotlin.descriptors.*
 import org.jetbrains.kotlin.descriptors.annotations.Annotations
-import org.jetbrains.kotlin.descriptors.impl.ClassConstructorDescriptorImpl
-import org.jetbrains.kotlin.descriptors.impl.PropertyDescriptorImpl
-import org.jetbrains.kotlin.descriptors.impl.SimpleFunctionDescriptorImpl
-import org.jetbrains.kotlin.descriptors.impl.ValueParameterDescriptorImpl
+import org.jetbrains.kotlin.descriptors.impl.*
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.IrStatement
 import org.jetbrains.kotlin.ir.declarations.*
-import org.jetbrains.kotlin.ir.declarations.impl.IrConstructorImpl
-import org.jetbrains.kotlin.ir.declarations.impl.IrFieldImpl
-import org.jetbrains.kotlin.ir.declarations.impl.IrFunctionImpl
+import org.jetbrains.kotlin.ir.declarations.impl.*
 import org.jetbrains.kotlin.ir.expressions.*
 import org.jetbrains.kotlin.ir.expressions.impl.*
+import org.jetbrains.kotlin.ir.util.createParameterDeclarations
 import org.jetbrains.kotlin.ir.util.transformFlat
 import org.jetbrains.kotlin.ir.visitors.*
 import org.jetbrains.kotlin.name.Name
@@ -139,8 +135,8 @@ class LocalDeclarationsLowering(val context: BackendContext) : DeclarationContai
 
         val transformedDescriptors = mutableMapOf<DeclarationDescriptor, DeclarationDescriptor>()
 
-        val CallableDescriptor.transformed: CallableDescriptor?
-            get() = transformedDescriptors[this] as CallableDescriptor?
+        val FunctionDescriptor.transformed: FunctionDescriptor?
+            get() = transformedDescriptors[this] as FunctionDescriptor?
 
         val oldParameterToNew: MutableMap<ParameterDescriptor, ParameterDescriptor> = HashMap()
         val newParameterToOld: MutableMap<ParameterDescriptor, ParameterDescriptor> = HashMap()
@@ -171,6 +167,8 @@ class LocalDeclarationsLowering(val context: BackendContext) : DeclarationContai
                                 it.transformedDescriptor,
                                 original.body
                         ).apply {
+                            createParameterDeclarations()
+
                             original.descriptor.valueParameters.filter { it.declaresDefaultValue() }.forEach { argument ->
                                 val body = original.getDefault(argument)!!
                                 this.putDefault(oldParameterToNew[argument] as ValueParameterDescriptor, body)
@@ -210,6 +208,9 @@ class LocalDeclarationsLowering(val context: BackendContext) : DeclarationContai
                 if (transformedDescriptor != null) {
                     return IrConstructorImpl(declaration.startOffset, declaration.endOffset, declaration.origin,
                             transformedDescriptor, declaration.body!!).apply {
+
+                        createParameterDeclarations()
+
                         declaration.descriptor.valueParameters.filter { it.declaresDefaultValue() }.forEach { argument ->
                             val body = declaration.getDefault(argument)!!
                             this.putDefault(oldParameterToNew[argument] as ValueParameterDescriptor, body)
@@ -290,13 +291,13 @@ class LocalDeclarationsLowering(val context: BackendContext) : DeclarationContai
                 return this
             }
 
-            override fun visitCallableReference(expression: IrCallableReference): IrExpression {
+            override fun visitFunctionReference(expression: IrFunctionReference): IrExpression {
                 expression.transformChildrenVoid(this)
 
                 val oldCallee = expression.descriptor.original
                 val newCallee = oldCallee.transformed ?: return expression
 
-                val newCallableReference = IrCallableReferenceImpl(
+                val newCallableReference = IrFunctionReferenceImpl(
                         expression.startOffset, expression.endOffset,
                         expression.type, // TODO functional type for transformed descriptor
                         newCallee,
@@ -389,7 +390,7 @@ class LocalDeclarationsLowering(val context: BackendContext) : DeclarationContai
             rewriteFunctionBody(memberDeclaration, null)
         }
 
-        private fun createNewCall(oldCall: IrCall, newCallee: CallableDescriptor) =
+        private fun createNewCall(oldCall: IrCall, newCallee: FunctionDescriptor) =
                 if (oldCall is IrCallWithShallowCopy)
                     oldCall.shallowCopy(oldCall.origin, newCallee, oldCall.superQualifier)
                 else
@@ -401,13 +402,13 @@ class LocalDeclarationsLowering(val context: BackendContext) : DeclarationContai
                     )
 
         private fun remapTypeArguments(oldExpression: IrMemberAccessExpression, newCallee: CallableDescriptor): Map<TypeParameterDescriptor, KotlinType>? {
-            val oldCallee = oldExpression.descriptor
+            val oldCallee = oldExpression.descriptor.original
 
             return if (oldCallee.typeParameters.isEmpty())
                 null
             else oldCallee.typeParameters.associateBy(
                     { newCallee.typeParameters[it.index] },
-                    { oldExpression.getTypeArgument(it)!! }
+                    { oldExpression.getTypeArgumentOrDefault(it) }
             )
         }
 
@@ -456,6 +457,7 @@ class LocalDeclarationsLowering(val context: BackendContext) : DeclarationContai
                     oldDescriptor.source
             ).apply {
                 isTailrec = oldDescriptor.isTailrec
+                isSuspend = oldDescriptor.isSuspend
                 // TODO: copy other properties or consider using `FunctionDescriptor.CopyBuilder`.
             }
 

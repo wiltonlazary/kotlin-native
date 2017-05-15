@@ -51,8 +51,7 @@ external public fun Char.isIdentifierIgnorable(): Boolean
  * Returns `true` if this character is an ISO control character.
  */
 @SymbolName("Kotlin_Char_isISOControl")
-@Suppress("NOTHING_TO_INLINE")
-external public inline fun Char.isISOControl(): Boolean
+external public fun Char.isISOControl(): Boolean
 
 /**
  * Determines whether a character is whitespace according to the Unicode standard.
@@ -97,8 +96,11 @@ external public fun Char.isHighSurrogate(): Boolean
 @SymbolName("Kotlin_Char_isLowSurrogate")
 external public fun Char.isLowSurrogate(): Boolean
 
-@SymbolName("Kotlin_Char_digitOf")
-external internal fun digitOf(char: Char, radix: Int): Int
+
+internal fun digitOf(char: Char, radix: Int): Int = digitOfChecked(char, checkRadix(radix))
+
+@SymbolName("Kotlin_Char_digitOfChecked")
+external internal fun digitOfChecked(char: Char, radix: Int): Int
 
 /**
  * Checks whether the given [radix] is valid radix for string to number and number to string conversion.

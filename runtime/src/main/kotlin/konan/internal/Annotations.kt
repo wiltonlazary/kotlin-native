@@ -28,10 +28,6 @@ package konan.internal
 //@Retention(AnnotationRetention.SOURCE)
 annotation class ExportForCppRuntime(val name: String = "")
 
-// This one is used internally to mark the presence of a backing field
-// in the absence of IR.
-annotation class HasBackingField
-
 /**
  * This annotation denotes that the element is intrinsic and its usages require special handling in compiler.
  */
@@ -45,3 +41,11 @@ annotation class Intrinsic
 @Target(AnnotationTarget.FUNCTION, AnnotationTarget.CONSTRUCTOR, AnnotationTarget.CLASS)
 @Retention(AnnotationRetention.BINARY)
 annotation class ExportForCompiler
+
+/**
+ * Annotated constructor will be inlined.
+ */
+@Target(AnnotationTarget.CONSTRUCTOR)
+@Retention(AnnotationRetention.BINARY)
+annotation class InlineConstructor
+

@@ -16,6 +16,9 @@
 
 package org.jetbrains.kotlin.serialization
 
+import org.jetbrains.kotlin.backend.konan.descriptors.needsSerializedIr
+import org.jetbrains.kotlin.backend.konan.serialization.IrAwareExtension
+import org.jetbrains.kotlin.backend.konan.util.onlyIf
 import org.jetbrains.kotlin.builtins.KotlinBuiltIns
 import org.jetbrains.kotlin.builtins.isSuspendFunctionType
 import org.jetbrains.kotlin.builtins.transformSuspendFunctionToRuntimeFunctionType
@@ -35,13 +38,6 @@ import org.jetbrains.kotlin.types.typeUtil.contains
 import org.jetbrains.kotlin.utils.Interner
 import java.io.ByteArrayOutputStream
 import java.util.*
-
-import org.jetbrains.kotlin.backend.konan.serialization.KonanSerializerExtension
-
-// This is an almost exact copy of DescriptorSerializer 
-// from the big Kotlin.
-// The only difference for now is typeId is public now.
-// Consider bringing the new functionaity upstream.
 
 class KonanDescriptorSerializer private constructor(
         private val containingDeclaration: DeclarationDescriptor?,
@@ -72,7 +68,8 @@ class KonanDescriptorSerializer private constructor(
 
         val flags = Flags.getClassFlags(
                 hasAnnotations(classDescriptor), classDescriptor.visibility, classDescriptor.modality, classDescriptor.kind,
-                classDescriptor.isInner, classDescriptor.isCompanionObject, classDescriptor.isData, classDescriptor.isExternal
+                classDescriptor.isInner, classDescriptor.isCompanionObject, classDescriptor.isData, classDescriptor.isExternal,
+                classDescriptor.isHeader
         )
         if (flags != builder.flags) {
             builder.flags = flags
@@ -195,7 +192,7 @@ class KonanDescriptorSerializer private constructor(
         val flags = Flags.getPropertyFlags(
                 hasAnnotations, descriptor.visibility, descriptor.modality, descriptor.kind, descriptor.isVar,
                 hasGetter, hasSetter, hasConstant, isConst, lateInit, descriptor.isExternal,
-                @Suppress("DEPRECATION") descriptor.isDelegated
+                @Suppress("DEPRECATION") descriptor.isDelegated, descriptor.isHeader
         )
         if (flags != builder.flags) {
             builder.flags = flags
@@ -230,6 +227,17 @@ class KonanDescriptorSerializer private constructor(
 
         extension.serializeProperty(descriptor, builder)
 
+        if (extension is IrAwareExtension) {
+            descriptor.getter?.onlyIf({needsSerializedIr}) {
+                extension.addGetterIR(builder,
+                    extension.serializeInlineBody(it, {it -> typeId(it)}))
+            }
+            descriptor.setter?.onlyIf({needsSerializedIr}) {
+                extension.addSetterIR(builder,
+                    extension.serializeInlineBody(it, {it -> typeId(it)}))
+            }
+        }
+
         return builder
     }
 
@@ -240,7 +248,8 @@ class KonanDescriptorSerializer private constructor(
 
         val flags = Flags.getFunctionFlags(
                 hasAnnotations(descriptor), descriptor.visibility, descriptor.modality, descriptor.kind, descriptor.isOperator,
-                descriptor.isInfix, descriptor.isInline, descriptor.isTailrec, descriptor.isExternal, descriptor.isSuspend
+                descriptor.isInfix, descriptor.isInline, descriptor.isTailrec, descriptor.isExternal, descriptor.isSuspend,
+                descriptor.isHeader
         )
         if (flags != builder.flags) {
             builder.flags = flags
@@ -285,6 +294,12 @@ class KonanDescriptorSerializer private constructor(
         }
 
         extension.serializeFunction(descriptor, builder)
+
+        if (extension is IrAwareExtension 
+            && descriptor.needsSerializedIr) {
+            extension.addFunctionIR(builder, 
+                extension.serializeInlineBody(descriptor, {it -> typeId(it)}))
+        }
 
         return builder
     }

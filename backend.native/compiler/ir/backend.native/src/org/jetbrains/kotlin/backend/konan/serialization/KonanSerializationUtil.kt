@@ -22,6 +22,7 @@ import org.jetbrains.kotlin.backend.konan.KonanBuiltIns
 import org.jetbrains.kotlin.backend.konan.llvm.base64Decode
 import org.jetbrains.kotlin.backend.konan.llvm.base64Encode
 import org.jetbrains.kotlin.config.CompilerConfiguration
+import org.jetbrains.kotlin.config.languageVersionSettings
 import org.jetbrains.kotlin.descriptors.*
 import org.jetbrains.kotlin.descriptors.CallableMemberDescriptor.Kind.DECLARATION
 import org.jetbrains.kotlin.descriptors.Modality.FINAL
@@ -40,6 +41,7 @@ import org.jetbrains.kotlin.resolve.DescriptorUtils
 import org.jetbrains.kotlin.resolve.scopes.DescriptorKindFilter
 import org.jetbrains.kotlin.resolve.scopes.MemberScope
 import org.jetbrains.kotlin.serialization.KonanDescriptorSerializer
+import org.jetbrains.kotlin.serialization.KonanIr
 import org.jetbrains.kotlin.serialization.KonanLinkData
 import org.jetbrains.kotlin.serialization.ProtoBuf
 import org.jetbrains.kotlin.serialization.deserialization.*
@@ -126,7 +128,7 @@ internal fun deserializeModule(configuration: CompilerConfiguration,
     val moduleDescriptor = ModuleDescriptorImpl(
             Name.special(moduleName), storageManager, builtIns)
     builtIns.builtInsModule = moduleDescriptor
-    val deserializationConfiguration = CompilerDeserializationConfiguration(configuration)
+    val deserializationConfiguration = CompilerDeserializationConfiguration(configuration.languageVersionSettings)
 
     val libraryProto = KonanLinkData.Library
         .parseFrom(base64ToStream(library), 
@@ -154,37 +156,34 @@ internal class KonanSerializationUtil(val context: Context) {
 
     fun serializeClass(packageName: FqName,
         builder: KonanLinkData.Classes.Builder,  
-        classDescriptor: ClassDescriptor, 
-        skip: (DeclarationDescriptor) -> Boolean) {
+        classDescriptor: ClassDescriptor) {
 
-        if (skip(classDescriptor)) return
-
-        val classProto = serializer.classProto(classDescriptor).build()     
+        val localSerializer = KonanDescriptorSerializer.create(classDescriptor, serializerExtension)
+        val classProto = localSerializer.classProto(classDescriptor).build()
             ?: error("Class not serialized: $classDescriptor")
 
         builder.addClasses(classProto)
-        val index = serializer.stringTable.getFqNameIndex(classDescriptor)
+        val index = localSerializer.stringTable.getFqNameIndex(classDescriptor)
         builder.addClassName(index)
 
         serializeClasses(packageName, builder, 
             classDescriptor.unsubstitutedInnerClassesScope
-                .getContributedDescriptors(DescriptorKindFilter.CLASSIFIERS), skip)
+                .getContributedDescriptors(DescriptorKindFilter.CLASSIFIERS))
     }
 
     fun serializeClasses(packageName: FqName, 
         builder: KonanLinkData.Classes.Builder, 
-        descriptors: Collection<DeclarationDescriptor>, 
-        skip: (DeclarationDescriptor) -> Boolean) {
+        descriptors: Collection<DeclarationDescriptor>) {
 
         for (descriptor in descriptors) {
             if (descriptor is ClassDescriptor) {
-                serializeClass(packageName, builder, descriptor, skip)
+                serializeClass(packageName, builder, descriptor)
             }
         }
     }
 
     fun serializePackage(fqName: FqName, module: ModuleDescriptor) : 
-        KonanLinkData.PackageFragment {
+        KonanLinkData.PackageFragment? {
 
         val packageView = module.getPackage(fqName)
 
@@ -193,21 +192,24 @@ internal class KonanSerializationUtil(val context: Context) {
         val skip: (DeclarationDescriptor) -> Boolean = 
             { DescriptorUtils.getContainingModule(it) != module }
 
-        val classifierDescriptors = KonanDescriptorSerializer.sort(packageView.memberScope.getContributedDescriptors(
-                DescriptorKindFilter.CLASSIFIERS))
-
-        val classesBuilder = KonanLinkData.Classes.newBuilder()
-
-        serializeClasses(fqName, classesBuilder, classifierDescriptors, skip)
-        val classesProto = classesBuilder.build()
+        val classifierDescriptors = KonanDescriptorSerializer
+            .sort(packageView.memberScope.getContributedDescriptors(DescriptorKindFilter.CLASSIFIERS))
+            .filterNot(skip)
 
         val fragments = packageView.fragments
         val members = fragments
                 .flatMap { fragment -> DescriptorUtils.getAllDescriptors(fragment.getMemberScope()) }
                 .filterNot(skip)
+
+        if (members.isEmpty() && classifierDescriptors.isEmpty()) return null
+
+        val classesBuilder = KonanLinkData.Classes.newBuilder()
+
+        serializeClasses(fqName, classesBuilder, classifierDescriptors)
+        val classesProto = classesBuilder.build()
+
         val packageProto = serializer.packagePartProto(fqName, members).build()
             ?: error("Package fragments not serialized: $fragments")
-
 
         val strings = serializerExtension.stringTable
         val (stringTableProto, nameTableProto) = strings.buildProto()
@@ -248,8 +250,10 @@ internal class KonanSerializationUtil(val context: Context) {
         val fragments = mutableListOf<String>()
         val fragmentNames = mutableListOf<String>()
 
-        getPackagesFqNames(moduleDescriptor).forEach {
+        getPackagesFqNames(moduleDescriptor).forEach iteration@ {
             val packageProto = serializePackage(it, moduleDescriptor)
+            if (packageProto == null) return@iteration
+
             libraryProto.addPackageFragmentName(it.asString())
             fragments.add(
                 byteArrayToBase64(packageProto.toByteArray()))
@@ -293,15 +297,16 @@ internal class KonanSerializationUtil(val context: Context) {
         return property
     }
 
-    fun serializeLocalDeclaration(descriptor: DeclarationDescriptor): KonanLinkData.Descriptor {
+    fun serializeLocalDeclaration(descriptor: DeclarationDescriptor): KonanIr.DeclarationDescriptor {
 
-        val proto = KonanLinkData.Descriptor.newBuilder()
+        val proto = KonanIr.DeclarationDescriptor.newBuilder()
 
-        context.log("### serializeLocalDeclaration: $descriptor")
+        context.log{"### serializeLocalDeclaration: $descriptor"}
 
         when (descriptor) {
             is FunctionDescriptor ->
                 proto.setFunction(serializer.functionProto(descriptor))
+
             is PropertyDescriptor ->
                 proto.setProperty(serializer.propertyProto(descriptor))
 

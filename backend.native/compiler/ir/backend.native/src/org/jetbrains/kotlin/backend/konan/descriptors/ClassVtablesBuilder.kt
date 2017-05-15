@@ -29,10 +29,7 @@ internal class OverriddenFunctionDescriptor(val descriptor: FunctionDescriptor, 
     val overriddenDescriptor = overriddenDescriptor.original
 
     val needBridge: Boolean
-        get() {
-            if (descriptor.modality == Modality.ABSTRACT) return false
-            return descriptor.target.needBridgeTo(overriddenDescriptor)
-        }
+        get() = descriptor.target.needBridgeTo(overriddenDescriptor)
 
     val bridgeDirections: BridgeDirections
         get() = descriptor.target.bridgeDirectionsTo(overriddenDescriptor)
@@ -43,11 +40,9 @@ internal class OverriddenFunctionDescriptor(val descriptor: FunctionDescriptor, 
                 || DescriptorUtils.getAllOverriddenDeclarations(overriddenDescriptor).any { it.isOverridable }
 
     val inheritsBridge: Boolean
-        get() {
-            return !descriptor.kind.isReal
-                    && OverridingUtil.overrides(descriptor.target, overriddenDescriptor)
-                    && descriptor.bridgeDirectionsTo(overriddenDescriptor).allNotNeeded()
-        }
+        get() = !descriptor.kind.isReal
+                && OverridingUtil.overrides(descriptor.target, overriddenDescriptor)
+                && descriptor.bridgeDirectionsTo(overriddenDescriptor).allNotNeeded()
 
     override fun toString(): String {
         return "(descriptor=$descriptor, overriddenDescriptor=$overriddenDescriptor)"
@@ -81,7 +76,7 @@ internal class ClassVtablesBuilder(val classDescriptor: ClassDescriptor, val con
             context.getVtableBuilder(classDescriptor.getSuperClassOrAny()).vtableEntries
         }
 
-        val methods = classDescriptor.contributedMethods
+        val methods = classDescriptor.sortedContributedMethods
         val newVtableSlots = mutableListOf<OverriddenFunctionDescriptor>()
 
         val inheritedVtableSlots = superVtableEntries.map { superMethod ->
@@ -117,7 +112,7 @@ internal class ClassVtablesBuilder(val classDescriptor: ClassDescriptor, val con
     val methodTableEntries: List<OverriddenFunctionDescriptor> by lazy {
         assert(!classDescriptor.isAbstract())
 
-        classDescriptor.contributedMethods
+        classDescriptor.sortedContributedMethods
                 .flatMap { method -> method.allOverriddenDescriptors.map { OverriddenFunctionDescriptor(method, it) } }
                 .filter { it.canBeCalledVirtually }
                 .distinctBy { Triple(it.overriddenDescriptor.functionName, it.descriptor, it.needBridge) }

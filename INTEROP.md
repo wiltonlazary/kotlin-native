@@ -78,6 +78,74 @@ output of config script with `--cflags` flag (maybe without exact paths).
 Output of config script with `--libs` shall be passed as `-linkedArgs`  `kotlinc`
 flag value (quoted) when compiling.
 
+### Selecting library headers
+
+When library headers are imported to C program with `#include` directive,
+all of the headers included by these headers are also included to the program.
+Thus all header dependencies are included in generated stubs as well.
+
+This behaviour is correct but may be very inconvenient for some libraries. So
+it is possible to specify in `.def` file which of the included headers are to
+be imported. The separate declarations from other headers may also be imported
+in case of direct dependencies.
+
+#### Filtering headers by globs
+
+It is possible to filter header by globs. The `headerFilter` property value
+from the `.def` file is treated as space-separated list of globs. If the
+included header matches any of the globs, then declarations from this header
+are included into the bindings.
+
+The globs are applied to the header paths relative to the appropriate include
+path elements, e.g. `time.h` or `curl/curl.h`. So if the library is usually
+included with `#include <SomeLbrary/Header.h>`, then it would probably be
+correct to filter headers with
+```
+headerFilter = SomeLbrary/**
+```
+
+If `headerFilter` is not specified, then all headers are included.
+
+#### Filtering by module maps
+
+Some libraries have proper `module.modulemap` or `module.map` files among its
+headers. For example, macOS and iOS system libraries and frameworks do.
+The [module map file](https://clang.llvm.org/docs/Modules.html#module-map-language)
+describes the correspondence between header files and modules. When the module
+maps are available, the headers from the modules that are not included directly
+can be filtered out using experimental `excludeDependentModules` option of the
+`.def` file:
+```
+headers = OpenGL/gl.h OpenGL/glu.h GLUT/glut.h
+compilerOpts = -framework OpenGL -framework GLUT
+excludeDependentModules = true
+```
+
+When both `excludeDependentModules` and `headerFilter` are used, they are
+applied as intersection.
+
+### Adding custom declarations ###
+
+Sometimes it is required to add custom C declarations to the library before
+generating bindings (e.g. for [macros](#macros)). Instead of creating
+additional header file with these declarations, you can include them directly
+to the end of the `.def` file, after separating line, containing only the
+separator sequence `---`:
+
+```
+headers = errno.h
+
+---
+
+static inline int getErrno() {
+    return errno;
+}
+```
+
+Note that this part of the `.def` file is treated as part of the header file, so
+functions with body should be declared as `static`.
+The declarations are parsed after including the files from `headers` list.
+
 ## Using bindings ##
 
 ### Basic interop types ###
@@ -150,6 +218,16 @@ val intPtr: CPointer<IntVar> = bytePtr.reinterpret()
 
 As in C, those reinterpret casts are unsafe and could potentially lead to
 subtle memory problems in an application.
+
+Also there are unsafe casts between `CPointer<T>?` and `Long` available,
+provided by `.toLong()` and `.toCPointer<T>()` extension methods:
+```
+val longValue = ptr.toLong()
+val originalPtr = longValue.toCPointer<T>()
+```
+
+Note that if the type of the result is known from the context, the type argument
+can be omitted as usual due to type inference.
 
 ### Memory allocation ###
 
@@ -245,17 +323,29 @@ In all cases the C string is supposed to be encoded as UTF-8.
 When C function takes or returns a struct `T` by value, the corresponding
 argument type or return type is represented as `CValue<T>`.
 
+`CValue<T>` is an opaque type, so structure fields cannot be accessed with
+appropriate Kotlin properties. It could be acceptable, if API uses structures
+as handles, but if field access is required, there are following conversion
+methods available:
+
+*   `fun T.readValue(): CValue<T>`. Converts (the lvalue) `T` to `CValue<T>`.
+    So to construct the `CValue<T>`, `T` can be allocated, filled and then
+    converted to `CValue<T>`.
+
+*   `CValue<T>.useContents(block: T.() -> R): R`. Temporarily places the
+    `CValue<T>` to the memory, and then runs the passed lambda with this placed
+    value `T` as receiver. So to read a single field, the following code can be
+    used:
+    ```
+    val fieldValue = structValue.useContents { field }
+    ```
+
 ### Callbacks ###
 
 To convert Kotlin function to pointer to C function,
-`staticCFunction(::kotlinFunction)` can be used. Currently `staticCFunction`
-heavily relies on type inference, so the expression `staticCFunction(...)`
-should be either assigned to the variable having proper type explicitly
-specified, or passed to the function, e.g.
-
-```
-glutDisplayFunc(staticCFunction(::display))
-```
+`staticCFunction(::kotlinFunction)` can be used. It is also allowed to provide
+the lambda instead of function reference. The function or lambda must not
+capture any values.
 
 Note that some function types are not supported currently. For example,
 it is not possible to get pointer to function that receives or returns structs
@@ -298,6 +388,24 @@ After that it becomes invalid, so `voidPtr` can't be unwrapped anymore.
 
 See `samples/libcurl` for more details.
 
+### Macros ###
+
+Every C macro that expands to a constant is represented as Kotlin property.
+Other macros are not supported. However they can be exposed manually by
+wrapping with supported declarations. E.g. function-like macro `FOO` can be
+exposed as function `foo` by
+[adding the custom declaration](#adding-custom-declarations) to the library:
+
+```
+headers = library/base.h
+
+---
+
+static inline int foo(int arg) {
+    return FOO(arg);
+}
+```
+
 ### Definition file hints ###
 
 The `.def` file supports several options for adjusting generated bindings.
@@ -321,7 +429,7 @@ neither implicit integer casts nor C-style integer casts (e.g.
 `(size_t) intValue`), so to make writing portable code in such cases easier,
 the following methods are provided:
 
-*   `fun ${type1}.sizeExtend<${type2}>(): ${type2}`
+*   `fun ${type1}.signExtend<${type2}>(): ${type2}`
 *   `fun ${type1}.narrow<${type2}>(): ${type2}`
 
 where each of `type1` and `type2` must be an integral type.
