@@ -27,21 +27,20 @@ enum class KonanPhase(val description: String,
     /* */ SERIALIZER("Serialize descriptor tree and inline IR bodies"),
     /* */ BACKEND("All backend"),
     /* ... */ LOWER("IR Lowering"),
-    /* ... ... */ LOWER_INLINE("Functions inlining"),
+    /* ... ... */ LOWER_INLINE_CONSTRUCTORS("Inline constructors transformation"),
+    /* ... ... */ LOWER_INLINE("Functions inlining", LOWER_INLINE_CONSTRUCTORS),
     /* ... ... ...  */ DESERIALIZER("Deserialize inline bodies"),
-    /* ... ... */ LOWER_INTEROP("Interop lowering"),
     /* ... ... */ LOWER_ENUMS("Enum classes lowering"),
     /* ... ... */ LOWER_DELEGATION("Delegation lowering"),
     /* ... ... */ LOWER_INITIALIZERS("Initializers lowering", LOWER_ENUMS),
     /* ... ... */ LOWER_SHARED_VARIABLES("Shared Variable Lowering", LOWER_INITIALIZERS),
-    /* ... ... */ LOWER_CALLABLES("Callable references Lowering",
-                        LOWER_INTEROP, LOWER_INITIALIZERS, LOWER_DELEGATION),
-    /* ... ... */ LOWER_VARARG("Vararg lowering", LOWER_CALLABLES),
     /* ... ... */ LOWER_LOCAL_FUNCTIONS("Local Function Lowering", LOWER_SHARED_VARIABLES),
+    /* ... ... */ LOWER_INTEROP("Interop lowering", LOWER_LOCAL_FUNCTIONS),
+    /* ... ... */ LOWER_CALLABLES("Callable references Lowering", LOWER_INTEROP, LOWER_DELEGATION, LOWER_LOCAL_FUNCTIONS),
+    /* ... ... */ LOWER_VARARG("Vararg lowering", LOWER_CALLABLES),
     /* ... ... */ LOWER_TAILREC("tailrec lowering", LOWER_LOCAL_FUNCTIONS),
     /* ... ... */ LOWER_FINALLY("Finally blocks lowering", LOWER_INITIALIZERS, LOWER_LOCAL_FUNCTIONS, LOWER_TAILREC),
-    /* ... ... */ LOWER_DEFAULT_PARAMETER_EXTENT("Default Parameter Extent Lowering",
-                        LOWER_TAILREC, LOWER_ENUMS),
+    /* ... ... */ LOWER_DEFAULT_PARAMETER_EXTENT("Default Parameter Extent Lowering", LOWER_TAILREC, LOWER_ENUMS),
     /* ... ... */ LOWER_INNER_CLASSES("Inner classes lowering", LOWER_DEFAULT_PARAMETER_EXTENT),
     /* ... ... */ LOWER_LATEINIT("Lateinit properties lowering"),
     /* ... ... */ LOWER_BUILTIN_OPERATORS("BuiltIn Operators Lowering", LOWER_DEFAULT_PARAMETER_EXTENT, LOWER_LATEINIT),
@@ -77,6 +76,7 @@ object KonanPhases {
 
             // Don't serialize anything to a final executable.
             KonanPhase.SERIALIZER.enabled = getBoolean(NOLINK)
+            KonanPhase.METADATOR.enabled = getBoolean(NOLINK)
 
             val disabled = get(DISABLED_PHASES)
             disabled?.forEach { phases[known(it)]!!.enabled = false }

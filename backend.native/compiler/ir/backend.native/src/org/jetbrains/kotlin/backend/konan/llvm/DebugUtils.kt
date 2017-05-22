@@ -22,13 +22,16 @@ import llvm.*
 import org.jetbrains.kotlin.backend.konan.Context
 import org.jetbrains.kotlin.backend.konan.KonanConfigKeys
 import org.jetbrains.kotlin.backend.konan.KonanVersion
+import org.jetbrains.kotlin.backend.konan.TargetManager
 import org.jetbrains.kotlin.backend.konan.util.File
 import org.jetbrains.kotlin.builtins.KotlinBuiltIns
 import org.jetbrains.kotlin.descriptors.FunctionDescriptor
 import org.jetbrains.kotlin.ir.SourceManager.FileEntry
 import org.jetbrains.kotlin.ir.declarations.IrFile
 import org.jetbrains.kotlin.js.descriptorUtils.getJetTypeFqName
+import org.jetbrains.kotlin.resolve.descriptorUtil.fqNameSafe
 import org.jetbrains.kotlin.types.KotlinType
+import org.jetbrains.kotlin.types.TypeUtils
 
 
 internal object DWARF {
@@ -39,6 +42,11 @@ internal object DWARF {
     val dwarfDebugInfoMetaDataNodeName = "Debug Info Version".mdString()
     val dwarfVersion = 2 /* TODO: configurable? like gcc/clang -gdwarf-2 and so on. */
     val debugInfoVersion = 3 /* TODO: configurable? */
+    /**
+     * This is  the value taken from [DIFlags.FlagFwdDecl], to mark type declaration as
+     * forward one.
+     */
+    val flagsForwardDeclaration = 4
 }
 
 internal class DebugInfo internal constructor(override val context: Context):ContextUtils {
@@ -94,7 +102,15 @@ internal fun String?.toFileAndFolder():FileAndFolder {
 
 internal fun generateDebugInfoHeader(context: Context) {
     if (context.shouldContainDebugInfo()) {
-        val path = context.config.configuration.get(KonanConfigKeys.BITCODE_FILE).toFileAndFolder()
+
+        val path = with(context.config.configuration) {
+            if (!getBoolean(KonanConfigKeys.NOLINK)) {
+                get(KonanConfigKeys.EXECUTABLE_FILE)!!
+            } else {
+                get(KonanConfigKeys.LIBRARY_NAME)!!
+            }
+        }.toFileAndFolder()
+
         context.debugInfo.module = DICreateModule(
                 builder = context.debugInfo.builder,
                 scope = context.llvmModule as DIScopeOpaqueRef,
@@ -149,7 +165,34 @@ internal fun KotlinType.dwarfType(context:Context, targetData:LLVMTargetDataRef)
             DICreateArrayType(context.debugInfo.builder, arrayElementType.size(context), arrayElementType.alignment(context),
                     arrayElementType.diType(context, targetData),  1) as DITypeOpaqueRef
         }
-        else -> debugInfoBaseType(context, targetData, "Any?", llvmType(context), encoding(context).value.toInt())
+        else -> {
+            val classDescriptor = TypeUtils.getClassDescriptor(this)
+            if (classDescriptor != null) {
+                /**
+                 * Ideally we'd use [KotlinType.typeInfoSymbolName] here , by type could be not
+                 * exportable.
+                 */
+                DICreateStructType(
+                        refBuilder    = context.debugInfo.builder,
+                        scope         = context.debugInfo.compilationModule as DIScopeOpaqueRef,
+                        name          = "ktype:${classDescriptor.fqNameSafe}",
+                        file          = null,
+                        lineNumber    = 0,
+                        sizeInBits    = 0,
+                        alignInBits   = 0,
+                        flags         = DWARF.flagsForwardDeclaration,
+                        derivedFrom   = null,
+                        elements      = null,
+                        elementsCount = 0,
+                        refPlace      = null)!! as DITypeOpaqueRef
+            }
+            else if (TypeUtils.isTypeParameter(this)){
+                //TODO: Type parameter,  how to deal with if?
+                debugInfoBaseType(context, targetData, this.toString(), llvmType(context), encoding(context).value.toInt())
+            } else {
+                TODO("$this: Does this case really exist?")
+            }
+        }
     }
 }
 

@@ -117,7 +117,7 @@ abstract class KonanTest extends JavaExec {
     }
 
     String buildExePath() {
-        def exeName = project.file(source).name.replace(".kt", ".kt.exe")
+        def exeName = project.file(source).name.replace(".kt", "")
         return "$outputDirectory/$exeName"
     }
 
@@ -206,9 +206,10 @@ fun handleExceptionContinuation(x: (Throwable) -> Unit): Continuation<Any?> = ob
     @TaskAction
     void executeTest() {
         createOutputDirectory()
-        def exe = buildExePath()
+        def program = buildExePath()
+        def exe = "${program}.kexe"
 
-        compileTest(buildCompileList(), exe)
+        compileTest(buildCompileList(), program)
 
         if (!run) {
             println "to be executed manually: $exe"
@@ -261,6 +262,12 @@ class RunKonanTest extends KonanTest {
 // from IDEA. Use the RunKonanTest instead.
 @ParallelizableTask
 class RunDriverKonanTest extends KonanTest {
+
+    RunDriverKonanTest() {
+        super()
+        dependsOn(project.rootProject.tasks['cross_dist'])
+    }
+
     void compileTest(List<String> filesToCompile, String exe) {
         runCompiler(filesToCompile, exe, flags?:[])
     }
@@ -420,6 +427,7 @@ class RunExternalTestGroup extends RunKonanTest {
         createLauncherFile("$outputDirectory/_launcher.kt", imports)
         result.add("$outputDirectory/_launcher.kt")
         result.add(project.file("testUtils.kt"))
+        result.add(project.file("helpers.kt"))
         return result
     }
 

@@ -137,8 +137,6 @@ internal fun KonanBuiltIns.getKonanInternalFunctions(name: String): List<Functio
     return konanInternal.getContributedFunctions(Name.identifier(name), NoLookupLocation.FROM_BACKEND).toList()
 }
 
-internal fun KotlinType.isUnboundCallableReference() = this.isRepresentedAs(ValueType.UNBOUND_CALLABLE_REFERENCE)
-
 internal val KotlinType.isFunctionOrKFunctionType: Boolean
     get() {
         val kind = constructor.declarationDescriptor?.getFunctionalClassKind()
@@ -212,7 +210,7 @@ fun ClassDescriptor.isAbstract() = this.modality == Modality.SEALED || this.moda
 
 internal fun FunctionDescriptor.hasValueTypeAt(index: Int): Boolean {
     when (index) {
-        0 -> return !isSuspend && returnType.let { it != null && it.isValueType() }
+        0 -> return !isSuspend && returnType.let { it != null && (it.isValueType() || it.isUnit()) }
         1 -> return extensionReceiverParameter.let { it != null && it.type.isValueType() }
         else -> return this.valueParameters[index - 2].type.isValueType()
     }
@@ -220,7 +218,7 @@ internal fun FunctionDescriptor.hasValueTypeAt(index: Int): Boolean {
 
 internal fun FunctionDescriptor.hasReferenceAt(index: Int): Boolean {
     when (index) {
-        0 -> return isSuspend || returnType.let { it != null && !it.isValueType() }
+        0 -> return isSuspend || returnType.let { it != null && !it.isValueType() && !it.isUnit() }
         1 -> return extensionReceiverParameter.let { it != null && !it.type.isValueType() }
         else -> return !this.valueParameters[index - 2].type.isValueType()
     }
@@ -241,13 +239,12 @@ internal enum class BridgeDirection {
     TO_VALUE_TYPE
 }
 
-private fun FunctionDescriptor.bridgeDirectionToAt(target: FunctionDescriptor, index: Int): BridgeDirection {
-    when {
-        hasValueTypeAt(index) && target.hasReferenceAt(index) -> return BridgeDirection.FROM_VALUE_TYPE
-        hasReferenceAt(index) && target.hasValueTypeAt(index) -> return BridgeDirection.TO_VALUE_TYPE
-        else -> return BridgeDirection.NOT_NEEDED
-    }
-}
+private fun FunctionDescriptor.bridgeDirectionToAt(target: FunctionDescriptor, index: Int)
+       = when {
+            hasValueTypeAt(index) && target.hasReferenceAt(index) -> BridgeDirection.FROM_VALUE_TYPE
+            hasReferenceAt(index) && target.hasValueTypeAt(index) -> BridgeDirection.TO_VALUE_TYPE
+            else -> BridgeDirection.NOT_NEEDED
+        }
 
 internal class BridgeDirections(val array: Array<BridgeDirection>) {
     constructor(parametersCount: Int): this(Array<BridgeDirection>(parametersCount + 2, { BridgeDirection.NOT_NEEDED }))
@@ -259,8 +256,8 @@ internal class BridgeDirections(val array: Array<BridgeDirection>) {
         array.forEach {
             result.append(when (it) {
                 BridgeDirection.FROM_VALUE_TYPE -> 'U' // unbox
-                BridgeDirection.TO_VALUE_TYPE -> 'B' // box
-                BridgeDirection.NOT_NEEDED -> 'N' // none
+                BridgeDirection.TO_VALUE_TYPE   -> 'B' // box
+                BridgeDirection.NOT_NEEDED      -> 'N' // none
             })
         }
         return result.toString()
@@ -297,6 +294,20 @@ internal fun FunctionDescriptor.bridgeDirectionsTo(overriddenDescriptor: Functio
     return ourDirections
 }
 
+tailrec internal fun DeclarationDescriptor.findPackage(): PackageFragmentDescriptor {
+    return if (this is PackageFragmentDescriptor) this 
+        else this.containingDeclaration!!.findPackage()
+}
+
+internal fun DeclarationDescriptor.allContainingDeclarations(): List<DeclarationDescriptor> {
+    var list = mutableListOf<DeclarationDescriptor>()
+    var current = this.containingDeclaration
+    while (current != null) {
+        list.add(current)
+        current = current.containingDeclaration
+    }
+    return list
+}
 
 internal fun DeclarationDescriptor.getMemberScope(): MemberScope {
         val containingScope = when (this) {

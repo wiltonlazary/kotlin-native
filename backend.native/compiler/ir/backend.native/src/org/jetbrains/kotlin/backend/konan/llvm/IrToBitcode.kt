@@ -23,9 +23,13 @@ import org.jetbrains.kotlin.backend.common.descriptors.isSuspend
 import org.jetbrains.kotlin.backend.konan.Context
 import org.jetbrains.kotlin.backend.konan.KonanConfigKeys
 import org.jetbrains.kotlin.backend.konan.KonanPhase
+import org.jetbrains.kotlin.backend.konan.library.LinkData
 import org.jetbrains.kotlin.backend.konan.PhaseManager
 import org.jetbrains.kotlin.backend.konan.descriptors.*
 import org.jetbrains.kotlin.backend.konan.ir.*
+import org.jetbrains.kotlin.backend.konan.TargetManager
+import org.jetbrains.kotlin.backend.konan.library.KonanLibraryWriter
+import org.jetbrains.kotlin.backend.konan.library.SplitLibraryWriter
 import org.jetbrains.kotlin.builtins.KotlinBuiltIns
 import org.jetbrains.kotlin.descriptors.*
 import org.jetbrains.kotlin.incremental.components.NoLookupLocation
@@ -52,7 +56,9 @@ import org.jetbrains.kotlin.types.typeUtil.isUnit
 
 internal fun emitLLVM(context: Context) {
 
+        val config = context.config.configuration
         val irModule = context.irModule!!
+
         // Note that we don't set module target explicitly.
         // It is determined by the target of runtime.bc
         // (see Llvm class in ContextUtils)
@@ -61,7 +67,6 @@ internal fun emitLLVM(context: Context) {
         val llvmModule = LLVMModuleCreateWithName("out")!! // TODO: dispose
         context.llvmModule = llvmModule
         context.debugInfo.builder = DICreateBuilder(llvmModule)
-
         context.llvmDeclarations = createLlvmDeclarations(context)
 
         val phaser = PhaseManager(context)
@@ -70,33 +75,74 @@ internal fun emitLLVM(context: Context) {
             irModule.acceptVoid(RTTIGeneratorVisitor(context))
         }
 
-
         generateDebugInfoHeader(context)
 
         phaser.phase(KonanPhase.CODEGEN) {
             irModule.acceptVoid(CodeGeneratorVisitor(context))
         }
 
-        phaser.phase(KonanPhase.METADATOR) {
-            irModule.acceptVoid(MetadatorVisitor(context))
-        }
-
-        phaser.phase(KonanPhase.BITCODE_LINKER) {
-            for (library in context.config.nativeLibraries) {
-                val libraryModule = parseBitcodeFile(library)
-                val failed = LLVMLinkModules2(llvmModule, libraryModule)
-                if (failed != 0) {
-                    throw Error("failed to link $library") // TODO: retrieve error message from LLVM.
-                }
-            }
-        }
-
         if (context.shouldContainDebugInfo()) {
             DIFinalize(context.debugInfo.builder)
         }
-        LLVMWriteBitcodeToFile(llvmModule, context.config.configuration.get(KonanConfigKeys.BITCODE_FILE)!!)
+        
+        if (!config.getBoolean(KonanConfigKeys.NOLINK)) {
+            val program = config.get(KonanConfigKeys.PROGRAM_NAME)!!
+            val output = "${program}.kt.bc"
+            context.bitcodeFileName = output
+
+            phaser.phase(KonanPhase.BITCODE_LINKER) {
+                for (library in context.config.nativeLibraries) {
+                    val libraryModule = parseBitcodeFile(library)
+                    val failed = LLVMLinkModules2(llvmModule, libraryModule)
+                    if (failed != 0) {
+                        throw Error("failed to link $library") // TODO: retrieve error message from LLVM.
+                    }
+                 }
+            }
+
+            LLVMWriteBitcodeToFile(llvmModule, output)
+        } else {
+
+            val libraryName = config.get(KonanConfigKeys.LIBRARY_NAME)!!
+            val nopack = config.getBoolean(KonanConfigKeys.NOPACK)
+            val targetName = context.config.targetManager.currentName
+
+            val library = buildLibrary(
+                phaser, 
+                context.config.nativeLibraries, 
+                context.serializedLinkData!!, 
+                targetName,
+                libraryName, 
+                llvmModule,
+                nopack)
+
+            context.library = library
+
+            context.bitcodeFileName = 
+                library.mainBitcodeFileName
+        }
 }
 
+internal fun buildLibrary(phaser: PhaseManager, natives: List<String>, linkData: LinkData, target: String, output: String, llvmModule: LLVMModuleRef, nopack: Boolean): KonanLibraryWriter {
+    // TODO: May be we need a factory?
+    //val library = KtBcLibraryWriter(output, llvmModule)
+    val library = SplitLibraryWriter(output, target, nopack)
+
+    library.addKotlinBitcode(llvmModule)
+
+    phaser.phase(KonanPhase.METADATOR) {
+        library.addLinkData(linkData)
+    }
+
+    phaser.phase(KonanPhase.BITCODE_LINKER) {
+        natives.forEach {
+            library.addNativeBitcode(it)
+        }
+    }
+
+    library.commit()
+    return library
+}
 
 internal fun verifyModule(llvmModule: LLVMModuleRef, current: String = "") {
     memScoped {
@@ -134,19 +180,6 @@ internal class RTTIGeneratorVisitor(context: Context) : IrElementVisitorVoid {
 
 //-------------------------------------------------------------------------//
 
-internal class MetadatorVisitor(val context: Context) : IrElementVisitorVoid {
-
-    val metadator = MetadataGenerator(context)
-
-    override fun visitElement(element: IrElement) {
-        element.acceptChildrenVoid(this)
-    }
-
-    override fun visitModuleFragment(module: IrModuleFragment) {
-        module.acceptChildrenVoid(this)
-        metadator.endModule(module)
-    }
-}
 
 /**
  * Defines how to generate context-dependent operations.
@@ -655,7 +688,7 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
             is IrBreak               -> return evaluateBreak                  (value)
             is IrContinue            -> return evaluateContinue               (value)
             is IrGetObjectValue      -> return evaluateGetObjectValue         (value)
-            is IrCallableReference   -> return evaluateCallableReference      (value)
+            is IrFunctionReference   -> return evaluateFunctionReference      (value)
             is IrSuspendableExpression ->
                                         return evaluateSuspendableExpression  (value)
             is IrSuspensionPoint     -> return evaluateSuspensionPoint        (value)
@@ -1710,17 +1743,16 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
 
     //-------------------------------------------------------------------------//
 
-    private fun evaluateCallableReference(expression: IrCallableReference): LLVMValueRef {
+    private fun evaluateFunctionReference(expression: IrFunctionReference): LLVMValueRef {
         // TODO: consider creating separate IR element for pointer to function.
-        assert (expression.type.isUnboundCallableReference() ||
-                TypeUtils.getClassDescriptor(expression.type) == context.interopBuiltIns.cPointer)
+        assert (TypeUtils.getClassDescriptor(expression.type) == context.interopBuiltIns.cPointer)
 
         assert (expression.getArguments().isEmpty())
 
         val descriptor = expression.descriptor
         assert (descriptor.dispatchReceiverParameter == null)
 
-        val entry = codegen.functionEntryPointAddress(descriptor as FunctionDescriptor)
+        val entry = codegen.functionEntryPointAddress(descriptor)
         return entry
     }
 
@@ -1788,10 +1820,6 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
         val argsWithContinuationIfNeeded = if (descriptor.isSuspend)
                                                args + getContinuation()
                                            else args
-        if (descriptor.isFunctionInvoke) {
-            return evaluateFunctionInvoke(descriptor, argsWithContinuationIfNeeded, resultLifetime)
-        }
-
         if (descriptor.isIntrinsic) {
             return evaluateIntrinsicCall(callee, argsWithContinuationIfNeeded)
         }
@@ -1802,40 +1830,6 @@ internal class CodeGeneratorVisitor(val context: Context) : IrElementVisitorVoid
             else                               -> return evaluateSimpleFunctionCall(
                     descriptor, argsWithContinuationIfNeeded, resultLifetime, callee.superQualifier)
         }
-    }
-
-    //-------------------------------------------------------------------------//
-
-    private val functionImplUnboundRefGetter by lazy {
-        context.builtIns.getKonanInternalClass("FunctionImpl")
-                .unsubstitutedMemberScope.getContributedDescriptors()
-                .filterIsInstance<PropertyDescriptor>()
-                .single { it.name.asString() == "unboundRef" }
-                .getter!!
-    }
-
-    private fun evaluateFunctionInvoke(descriptor: FunctionDescriptor,
-                                       args: List<LLVMValueRef>, resultLifetime: Lifetime): LLVMValueRef {
-
-        // Note: the whole function code below is written in the assumption that
-        // `invoke` method receiver is passed as first argument.
-
-        val functionImpl = args[0] // Instance of `konan.internal.FunctionImpl`.
-
-        // `functionImpl.unboundRef` is the pointer to (static) function of type
-        // `(FunctionImpl, Arg_1, ..., Arg_n): Ret`. See [CallableReferenceLowering] for details.
-        // LLVM type for such function is equal to type for `FunctionImpl.invoke(Arg_1, ..., Arg_n): Ret`.
-        // So we can use the latter for simplicity:
-        val unboundRefType = codegen.getLlvmFunctionType(descriptor)
-
-        // Get `functionImpl.unboundRef`:
-        val unboundRef = evaluateSimpleFunctionCall(functionImplUnboundRefGetter,
-                listOf(functionImpl), Lifetime.IRRELEVANT /* unboundRef isn't managed reference */)
-
-        // Cast `functionImpl.unboundRef` to pointer to function:
-        val entryPtr = codegen.bitcast(pointerType(unboundRefType), unboundRef, "entry")
-
-        return call(descriptor, entryPtr, args, resultLifetime)
     }
 
     //-------------------------------------------------------------------------//

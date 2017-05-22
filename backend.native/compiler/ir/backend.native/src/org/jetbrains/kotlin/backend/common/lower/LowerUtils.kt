@@ -19,6 +19,7 @@ package org.jetbrains.kotlin.backend.common.lower
 import org.jetbrains.kotlin.backend.common.BackendContext
 import org.jetbrains.kotlin.backend.konan.util.atMostOne
 import org.jetbrains.kotlin.descriptors.*
+import org.jetbrains.kotlin.descriptors.impl.ValueParameterDescriptorImpl
 import org.jetbrains.kotlin.incremental.components.LookupLocation
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.IrStatement
@@ -31,6 +32,7 @@ import org.jetbrains.kotlin.ir.expressions.IrExpression
 import org.jetbrains.kotlin.ir.expressions.IrStatementOrigin
 import org.jetbrains.kotlin.ir.expressions.IrTypeOperator
 import org.jetbrains.kotlin.ir.expressions.impl.*
+import org.jetbrains.kotlin.ir.symbols.IrFieldSymbol
 import org.jetbrains.kotlin.ir.symbols.IrSymbol
 import org.jetbrains.kotlin.ir.visitors.IrElementTransformerVoid
 import org.jetbrains.kotlin.ir.visitors.IrElementVisitorVoid
@@ -76,13 +78,13 @@ class DeclarationIrBuilder : IrBuilderWithScope {
 
 @Deprecated("Creates unbound symbol")
 fun BackendContext.createIrBuilder(declarationDescriptor: DeclarationDescriptor,
-                                   startOffset : Int = UNDEFINED_OFFSET,
-                                   endOffset : Int = UNDEFINED_OFFSET) =
+                                   startOffset: Int = UNDEFINED_OFFSET,
+                                   endOffset: Int = UNDEFINED_OFFSET) =
         DeclarationIrBuilder(this, declarationDescriptor, startOffset, endOffset)
 
 fun BackendContext.createIrBuilder(symbol: IrSymbol,
-                                   startOffset : Int = UNDEFINED_OFFSET,
-                                   endOffset : Int = UNDEFINED_OFFSET) =
+                                   startOffset: Int = UNDEFINED_OFFSET,
+                                   endOffset: Int = UNDEFINED_OFFSET) =
         DeclarationIrBuilder(this, symbol, startOffset, endOffset)
 
 
@@ -124,11 +126,10 @@ fun IrBuilderWithScope.irNot(arg: IrExpression) =
 fun IrBuilderWithScope.irThrow(arg: IrExpression) =
         IrThrowImpl(startOffset, endOffset, context.builtIns.nothingType, arg)
 
-fun IrBuilderWithScope.irCatch(parameter: VariableDescriptor, result: IrExpression) =
+fun IrBuilderWithScope.irCatch(catchParameter: IrVariable) =
         IrCatchImpl(
                 startOffset, endOffset,
-                IrVariableImpl(startOffset, endOffset, IrDeclarationOrigin.CATCH_PARAMETER, parameter),
-                result
+                catchParameter
         )
 
 fun IrBuilderWithScope.irCast(arg: IrExpression, type: KotlinType, typeOperand: KotlinType) =
@@ -145,6 +146,12 @@ fun IrBuilderWithScope.irGetField(receiver: IrExpression, descriptor: PropertyDe
 @Deprecated("Creates unbound symbol")
 fun IrBuilderWithScope.irSetField(receiver: IrExpression, descriptor: PropertyDescriptor, value: IrExpression) =
         IrSetFieldImpl(startOffset, endOffset, descriptor, receiver, value)
+
+fun IrBuilderWithScope.irGetField(receiver: IrExpression, symbol: IrFieldSymbol) =
+        IrGetFieldImpl(startOffset, endOffset, symbol, receiver)
+
+fun IrBuilderWithScope.irSetField(receiver: IrExpression, symbol: IrFieldSymbol, value: IrExpression) =
+        IrSetFieldImpl(startOffset, endOffset, symbol, receiver, value)
 
 @Deprecated("Creates unbound symbol")
 open class IrBuildingTransformer(private val context: BackendContext) : IrElementTransformerVoid() {
@@ -259,4 +266,23 @@ fun IrConstructor.callsSuper(): Boolean {
     })
     assert(numberOfCalls == 1, { "Expected exactly one delegating constructor call but none encountered: $descriptor" })
     return callsSuper
+}
+
+fun ParameterDescriptor.copyAsValueParameter(newOwner: CallableDescriptor, index: Int)
+        = when (this) {
+    is ValueParameterDescriptor -> this.copy(newOwner, name, index)
+    is ReceiverParameterDescriptor -> ValueParameterDescriptorImpl(
+            containingDeclaration = newOwner,
+            original              = null,
+            index                 = index,
+            annotations           = annotations,
+            name                  = name,
+            outType               = type,
+            declaresDefaultValue  = false,
+            isCrossinline         = false,
+            isNoinline            = false,
+            varargElementType     = null,
+            source                = source
+    )
+    else -> throw Error("Unexpected parameter descriptor: $this")
 }

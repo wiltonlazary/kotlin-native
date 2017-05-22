@@ -688,6 +688,11 @@ task bridges_test17(type: RunKonanTest) {
     source = "codegen/bridges/test17.kt"
 }
 
+task bridges_test18(type: RunKonanTest) {
+    goldValue = "kotlin.Unit\n"
+    source = "codegen/bridges/test18.kt"
+}
+
 task bridges_linkTest(type: LinkKonanTest) {
     goldValue = "42\n42\n42\n"
     source = "codegen/bridges/linkTest_main.kt"
@@ -1734,6 +1739,21 @@ task deserialized_listof0(type: RunKonanTest) {
     source = "serialization/deserialized_listof0.kt"
 }
 
+task deserialized_members(type: LinkKonanTest) {
+    goldValue=
+        "first level\n"+
+        "second level\n"+
+        "third levelxz\n"+
+        "inner first level\n"+
+        "inner second level\n"+
+        "inner third level\n"+
+        "types first level: 13\n"+
+        "types second level cha-cha-cha\n"+
+        "types third level 1\n"
+    lib = "serialization/serialize_members.kt"
+    source = "serialization/deserialize_members.kt"
+}
+
 // Just check that the driver is able to produce runnable binaries.
 task driver0(type: RunDriverKonanTest) {
     goldValue = "Hello, world!\n"
@@ -1744,6 +1764,19 @@ task driver_opt(type: RunDriverKonanTest) {
     goldValue = "Hello, world!\n"
     source = "runtime/basic/hello0.kt"
     flags = ["-opt"]
+}
+
+// Check that cross-compilation completes successfully. We can't run such 
+// binaries, but we verify that the compiler has been built, operational 
+// and accepts the -target flag, resulting in a successful compilation.
+task driver_cross(type: RunDriverKonanTest) {
+    source = "runtime/basic/hello0.kt"
+    run = false
+    if (isLinux()) {
+        flags = ["-target", "raspberrypi"]
+    } else if (isMac()) {
+        flags = ["-target", "iphone"]
+    }
 }
 
 // Enable when deserialization for default arguments is fixed.
