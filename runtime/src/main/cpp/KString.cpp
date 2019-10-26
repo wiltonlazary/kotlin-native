@@ -13,38 +13,67 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-#include <limits.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
-#include <iterator>
-#include <string>
-
-#include "Assert.h"
+#include "KAssert.h"
 #include "City.h"
 #include "Exceptions.h"
 #include "Memory.h"
 #include "Natives.h"
 #include "KString.h"
+#include "Porting.h"
 #include "Types.h"
 
 #include "utf8.h"
 
 namespace {
 
-OBJ_GETTER(utf8ToUtf16, const char* rawString, size_t rawStringLength) {
-  uint32_t charCount = utf8::distance(rawString, rawString + rawStringLength);
-  ArrayHeader* result = AllocArrayInstance(
-    theStringTypeInfo, charCount, OBJ_RESULT)->array();
+typedef std::back_insert_iterator<KStdString> KStdStringInserter;
+typedef KChar* utf8to16(const char*, const char*, KChar*);
+typedef KStdStringInserter utf16to8(const KChar*,const KChar*, KStdStringInserter);
+
+KStdStringInserter utf16toUtf8OrThrow(const KChar* start, const KChar* end, KStdStringInserter result) {
+  TRY_CATCH(result = utf8::utf16to8(start, end, result),
+            result = utf8::unchecked::utf16to8(start, end, result),
+            ThrowCharacterCodingException());
+  return result;
+}
+
+template<utf8to16 conversion>
+OBJ_GETTER(utf8ToUtf16Impl, const char* rawString, const char* end, uint32_t charCount) {
+  if (rawString == nullptr) RETURN_OBJ(nullptr);
+  ArrayHeader* result = AllocArrayInstance(theStringTypeInfo, charCount, OBJ_RESULT)->array();
   KChar* rawResult = CharArrayAddressOfElementAt(result, 0);
-  auto convertResult =
-      utf8::utf8to16(rawString, rawString + rawStringLength, rawResult);
+  auto convertResult = conversion(rawString, end, rawResult);
   RETURN_OBJ(result->obj());
 }
+
+template<utf16to8 conversion>
+OBJ_GETTER(unsafeUtf16ToUtf8Impl, KString thiz, KInt start, KInt size) {
+  RuntimeAssert(thiz->type_info() == theStringTypeInfo, "Must use String");
+  const KChar* utf16 = CharArrayAddressOfElementAt(thiz, start);
+  KStdString utf8;
+  conversion(utf16, utf16 + size, back_inserter(utf8));
+  ArrayHeader* result = AllocArrayInstance(theByteArrayTypeInfo, utf8.size(), OBJ_RESULT)->array();
+  ::memcpy(ByteArrayAddressOfElementAt(result, 0), utf8.c_str(), utf8.size());
+  RETURN_OBJ(result->obj());
+}
+
+OBJ_GETTER(utf8ToUtf16OrThrow, const char* rawString, size_t rawStringLength) {
+  const char* end = rawString + rawStringLength;
+  uint32_t charCount;
+  TRY_CATCH(charCount = utf8::utf16_length(rawString, end),
+            charCount = utf8::unchecked::utf16_length(rawString, end),
+            ThrowCharacterCodingException());
+  RETURN_RESULT_OF(utf8ToUtf16Impl<utf8::unchecked::utf8to16>, rawString, end, charCount);
+}
+
+OBJ_GETTER(utf8ToUtf16, const char* rawString, size_t rawStringLength) {
+  const char* end = rawString + rawStringLength;
+  uint32_t charCount = utf8::with_replacement::utf16_length(rawString, end);
+  RETURN_RESULT_OF(utf8ToUtf16Impl<utf8::with_replacement::utf8to16>, rawString, end, charCount);
+}
+
 
 // Case conversion is derived work from Apache Harmony.
 // Unicode 3.0.1 (same as Unicode 3.0.0)
@@ -163,7 +192,6 @@ enum CharacterClass {
     OTHER_SYMBOL = 28,
     /**
      * Unicode category constant Pi.
-     *
      */
     INITIAL_QUOTE_PUNCTUATION = 29,
     /**
@@ -524,27 +552,6 @@ constexpr KChar typeValues[] = {
   0xffd7, 0x5, 0xffdc, 0x5, 0xffe1, 0x1a, 0xffe3, 0x1b19, 0xffe5, 0x1a1c, 0xffe6, 0x1a, 0xffe9, 0x191c, 0xffec, 0x19, 0xffee, 0x1c, 0xfffb, 0x10
 };
 
-template <typename T>
-int binarySearchRange(const T* array, int arrayLength, T needle) {
-  int bottom = 0;
-  int top = arrayLength - 1;
-  int middle = -1;
-  T value = 0;
-  while (bottom <= top) {
-    middle = (bottom + top) / 2;
-    value = array[middle];
-    if (needle > value)
-      bottom = middle + 1;
-    else if (needle == value)
-      return middle;
-    else
-      top = middle - 1;
-  }
-  return middle - (needle < value ? 1 : 0);
-}
-
-#define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
-
 KInt getType(KChar ch) {
   if (ch < 1000) {
     return typeValuesCache[ch];
@@ -653,17 +660,17 @@ int iswalnum_Konan(KChar ch) {
 }
 
 int iswspace_Konan(KChar ch) {
-  // Optimized case for ASCII.
+  // FILE, GROUP, RECORD, UNIT separators, # Zs SPACE or # Cc CONTROLs
   if ((ch >= 0x1c && ch <= 0x20) || (ch >= 0x9 && ch <= 0xd)) {
     return true;
   }
-  if (ch == 0x1680) {
-    return true;
-  }
-  if (ch < 0x2000 || ch == 0x2007) {
+  // not (# Zs OGHAM SPACE MARK or # Cc or # Zs NO-BREAK SPACE)
+  if (ch < 0x2000 && !(ch == 0x1680 || ch == 0x85 || ch == 0xA0)) {
     return false;
   }
-  return ch <= 0x200b || ch == 0x2028 || ch == 0x2029 || ch == 0x3000;
+  // if # Zl LINE SEPARATOR or # Zp PARAGRAPH SEPARATOR or # Zs NARROW NO-BREAK SPACE
+  // or # Zs MEDIUM MATHEMATICAL SPACE or # Zs IDEOGRAPHIC SPACE
+  return ch < 0x200b || ch == 0x2028 || ch == 0x2029 || ch == 0x202F || ch == 0x205F || ch == 0x3000;
 }
 
 int iswupper_Konan(KChar ch) {
@@ -690,130 +697,51 @@ int iswlower_Konan(KChar ch) {
   return getType(ch) == LOWERCASE_LETTER;
 }
 
-void checkParsingErrors(const char* c_str, const char* end, std::string::size_type c_str_size) {
-  if (end == c_str) {
-    ThrowNumberFormatException();
-  }
-  // According to http://docs.oracle.com/javase/8/docs/api/java/lang/Double.html#valueOf-java.lang.String-
-  // trailing whitespace characters must be ignored so we need to do an additional check.
-  for (const char* p = end; p < c_str + c_str_size; p++) {
-    if (!iswspace_Konan(*p)) {
-      ThrowNumberFormatException();
-    }
-  }
-}
-
-// TODO: Java Double.valueOf specification requires mandatory binary exponent character (p) in the string parsed if the string is a hex one.
-// See: http://docs.oracle.com/javase/8/docs/api/java/lang/Double.html#valueOf-java.lang.String-
-// E.g.
-// "0x77p0".toDouble() // OK for both Kotlin/JVM and Kotlin/Native.
-// "0x77".toDouble()   // throws NumberFormatException in Kotlin/JVM and OK in Kotlin/Native.
-// Do we need to handle such case? Or it is OK to consume such strings?
-KFloat parseFloat(KString value) {
-  const KChar* utf16 = CharArrayAddressOfElementAt(value, 0);
-  std::string utf8;
-  utf8::utf16to8(utf16, utf16 + value->count_, back_inserter(utf8));
-  char* end = nullptr;
-  KFloat result = strtof(utf8.c_str(), &end);
-  checkParsingErrors(utf8.c_str(), end, utf8.size());
-  return result;
-}
-
-KDouble parseDouble(KString value) {
-  const KChar* utf16 =
-      CharArrayAddressOfElementAt(value, 0);
-  std::string utf8;
-  utf8::utf16to8(utf16, utf16 + value->count_, back_inserter(utf8));
-  char* end = nullptr;
-  KDouble result = strtod(utf8.c_str(), &end);
-  checkParsingErrors(utf8.c_str(), end, utf8.size());
-  return result;
-}
-
 } // namespace
 
 extern "C" {
 
 OBJ_GETTER(CreateStringFromCString, const char* cstring) {
-  RETURN_RESULT_OF(utf8ToUtf16, cstring, strlen(cstring));
+  RETURN_RESULT_OF(utf8ToUtf16, cstring, cstring ? strlen(cstring) : 0);
 }
 
 OBJ_GETTER(CreateStringFromUtf8, const char* utf8, uint32_t lengthBytes) {
   RETURN_RESULT_OF(utf8ToUtf16, utf8, lengthBytes);
 }
 
+char* CreateCStringFromString(KConstRef kref) {
+  if (kref == nullptr) return nullptr;
+  KString kstring = kref->array();
+  const KChar* utf16 = CharArrayAddressOfElementAt(kstring, 0);
+  KStdString utf8;
+  utf8::unchecked::utf16to8(utf16, utf16 + kstring->count_, back_inserter(utf8));
+  char* result = reinterpret_cast<char*>(konan::calloc(1, utf8.size() + 1));
+  ::memcpy(result, utf8.c_str(), utf8.size());
+  return result;
+}
+
+void DisposeCString(char* cstring) {
+  if (cstring) konan::free(cstring);
+}
+
 // String.kt
-KInt Kotlin_String_compareTo(KString thiz, KString other) {
-  return memcmp(
-    CharArrayAddressOfElementAt(thiz, 0),
-    CharArrayAddressOfElementAt(other, 0),
-    (thiz->count_ < other->count_ ? thiz->count_ : other->count_) * sizeof(KChar));
-}
-
-KChar Kotlin_String_get(KString thiz, KInt index) {
-  if (static_cast<uint32_t>(index) >= thiz->count_) {
-    ThrowArrayIndexOutOfBoundsException();
+OBJ_GETTER(Kotlin_String_replace, KString thiz, KChar oldChar, KChar newChar, KBoolean ignoreCase) {
+  auto count = thiz->count_;
+  ArrayHeader* result = AllocArrayInstance(theStringTypeInfo, count, OBJ_RESULT)->array();
+  const KChar* thizRaw = CharArrayAddressOfElementAt(thiz, 0);
+  KChar* resultRaw = CharArrayAddressOfElementAt(result, 0);
+  if (ignoreCase) {
+    KChar oldCharLower = towlower_Konan(oldChar);
+    for (KInt index = 0; index < count; ++index) {
+      KChar thizChar = *thizRaw++;
+      *resultRaw++ = towlower_Konan(thizChar) == oldCharLower ? newChar : thizChar;
+    }
+  } else {
+    for (KInt index = 0; index < count; ++index) {
+      KChar thizChar = *thizRaw++;
+      *resultRaw++ = thizChar == oldChar ? newChar : thizChar;
+    }
   }
-  return *CharArrayAddressOfElementAt(thiz, index);
-}
-
-KInt Kotlin_String_getStringLength(KString thiz) {
-  return thiz->count_;
-}
-
-OBJ_GETTER(Kotlin_String_fromUtf8Array, KConstRef thiz, KInt start, KInt size) {
-  const ArrayHeader* array = thiz->array();
-  RuntimeAssert(array->type_info() == theByteArrayTypeInfo, "Must use a byte array");
-  if (start < 0 || size < 0 || size > array->count_ - start) {
-    ThrowArrayIndexOutOfBoundsException();
-  }
-  if (size == 0) {
-    RETURN_RESULT_OF0(TheEmptyString);
-  }
-  const char* rawString =
-    reinterpret_cast<const char*>(ByteArrayAddressOfElementAt(array, start));
-  RETURN_RESULT_OF(utf8ToUtf16, rawString, array->count_);
-}
-
-OBJ_GETTER(Kotlin_String_toUtf8Array, KString thiz, KInt start, KInt size) {
-  RuntimeAssert(thiz->type_info() == theStringTypeInfo, "Must use String");
-  if (start < 0 || size < 0 || size > thiz->count_ - start) {
-    ThrowArrayIndexOutOfBoundsException();
-  }
-  const KChar* utf16 = CharArrayAddressOfElementAt(thiz, start);
-  std::string utf8;
-  utf8::utf16to8(utf16, utf16 + size, back_inserter(utf8));
-  ArrayHeader* result = AllocArrayInstance(
-      theByteArrayTypeInfo, utf8.size() + 1, OBJ_RESULT)->array();
-  ::memcpy(ByteArrayAddressOfElementAt(result, 0), utf8.c_str(), utf8.size());
-  RETURN_OBJ(result->obj());
-}
-
-OBJ_GETTER(Kotlin_String_fromCharArray, KConstRef thiz, KInt start, KInt size) {
-  const ArrayHeader* array = thiz->array();
-  RuntimeAssert(array->type_info() == theCharArrayTypeInfo, "Must use a char array");
-  if (start < 0 || size < 0 || size > array->count_ - start) {
-    ThrowArrayIndexOutOfBoundsException();
-  }
-
-  if (size == 0) {
-    RETURN_RESULT_OF0(TheEmptyString);
-  }
-
-  ArrayHeader* result = AllocArrayInstance(
-      theStringTypeInfo, size, OBJ_RESULT)->array();
-  memcpy(CharArrayAddressOfElementAt(result, 0),
-         CharArrayAddressOfElementAt(array, start),
-         size * sizeof(KChar));
-  RETURN_OBJ(result->obj());
-}
-
-OBJ_GETTER(Kotlin_String_toCharArray, KString string) {
-  ArrayHeader* result = AllocArrayInstance(
-    theCharArrayTypeInfo, string->count_, OBJ_RESULT)->array();
-  memcpy(CharArrayAddressOfElementAt(result, 0),
-         CharArrayAddressOfElementAt(string, 0),
-         string->count_ * sizeof(KChar));
   RETURN_OBJ(result->obj());
 }
 
@@ -826,8 +754,7 @@ OBJ_GETTER(Kotlin_String_plusImpl, KString thiz, KString other) {
   if (result_length < thiz->count_ || result_length < other->count_) {
     ThrowArrayIndexOutOfBoundsException();
   }
-  ArrayHeader* result = AllocArrayInstance(
-    theStringTypeInfo, result_length, OBJ_RESULT)->array();
+  ArrayHeader* result = AllocArrayInstance(theStringTypeInfo, result_length, OBJ_RESULT)->array();
   memcpy(
       CharArrayAddressOfElementAt(result, 0),
       CharArrayAddressOfElementAt(thiz, 0),
@@ -838,6 +765,167 @@ OBJ_GETTER(Kotlin_String_plusImpl, KString thiz, KString other) {
       other->count_ * sizeof(KChar));
   RETURN_OBJ(result->obj());
 }
+
+OBJ_GETTER(Kotlin_String_toUpperCase, KString thiz) {
+  auto count = thiz->count_;
+  ArrayHeader* result = AllocArrayInstance(theStringTypeInfo, count, OBJ_RESULT)->array();
+  const KChar* thizRaw = CharArrayAddressOfElementAt(thiz, 0);
+  KChar* resultRaw = CharArrayAddressOfElementAt(result, 0);
+  for (KInt index = 0; index < count; ++index) {
+    *resultRaw++ = towupper_Konan(*thizRaw++);
+  }
+  RETURN_OBJ(result->obj());
+}
+
+OBJ_GETTER(Kotlin_String_toLowerCase, KString thiz) {
+  auto count = thiz->count_;
+  ArrayHeader* result = AllocArrayInstance(theStringTypeInfo, count, OBJ_RESULT)->array();
+  const KChar* thizRaw = CharArrayAddressOfElementAt(thiz, 0);
+  KChar* resultRaw = CharArrayAddressOfElementAt(result, 0);
+  for (KInt index = 0; index < count; ++index) {
+    *resultRaw++ = towlower_Konan(*thizRaw++);
+  }
+  RETURN_OBJ(result->obj());
+}
+
+OBJ_GETTER(Kotlin_String_unsafeStringFromCharArray, KConstRef thiz, KInt start, KInt size) {
+  const ArrayHeader* array = thiz->array();
+  RuntimeAssert(array->type_info() == theCharArrayTypeInfo, "Must use a char array");
+
+  if (size == 0) {
+    RETURN_RESULT_OF0(TheEmptyString);
+  }
+
+  ArrayHeader* result = AllocArrayInstance(theStringTypeInfo, size, OBJ_RESULT)->array();
+  memcpy(CharArrayAddressOfElementAt(result, 0),
+         CharArrayAddressOfElementAt(array, start),
+         size * sizeof(KChar));
+  RETURN_OBJ(result->obj());
+}
+
+OBJ_GETTER(Kotlin_String_toCharArray, KString string, KInt start, KInt size) {
+  ArrayHeader* result = AllocArrayInstance(theCharArrayTypeInfo, size, OBJ_RESULT)->array();
+  memcpy(CharArrayAddressOfElementAt(result, 0),
+         CharArrayAddressOfElementAt(string, start),
+         size * sizeof(KChar));
+  RETURN_OBJ(result->obj());
+}
+
+OBJ_GETTER(Kotlin_String_subSequence, KString thiz, KInt startIndex, KInt endIndex) {
+  if (startIndex < 0 || endIndex > thiz->count_ || startIndex > endIndex) {
+    // TODO: is it correct exception?
+    ThrowArrayIndexOutOfBoundsException();
+  }
+  if (startIndex == endIndex) {
+    RETURN_RESULT_OF0(TheEmptyString);
+  }
+  KInt length = endIndex - startIndex;
+  ArrayHeader* result = AllocArrayInstance(theStringTypeInfo, length, OBJ_RESULT)->array();
+  memcpy(CharArrayAddressOfElementAt(result, 0),
+         CharArrayAddressOfElementAt(thiz, startIndex),
+         length * sizeof(KChar));
+  RETURN_OBJ(result->obj());
+}
+
+KInt Kotlin_String_compareTo(KString thiz, KString other) {
+  int result = memcmp(
+    CharArrayAddressOfElementAt(thiz, 0),
+    CharArrayAddressOfElementAt(other, 0),
+    (thiz->count_ < other->count_ ? thiz->count_ : other->count_) * sizeof(KChar));
+  if (result != 0) return result;
+  int diff = thiz->count_ - other->count_;
+  if (diff == 0) return 0;
+  return diff < 0 ? -1 : 1;
+}
+
+KInt Kotlin_String_compareToIgnoreCase(KString thiz, KConstRef other) {
+  RuntimeAssert(thiz->type_info() == theStringTypeInfo &&
+                other->type_info() == theStringTypeInfo, "Must be strings");
+  // Important, due to literal internalization.
+  KString otherString = other->array();
+  if (thiz == otherString) return 0;
+  auto count = thiz->count_ < otherString->count_ ? thiz->count_ : otherString->count_;
+  const KChar* thizRaw = CharArrayAddressOfElementAt(thiz, 0);
+  const KChar* otherRaw = CharArrayAddressOfElementAt(otherString, 0);
+  for (KInt index = 0; index < count; ++index) {
+    int diff = towlower_Konan(*thizRaw++) - towlower_Konan(*otherRaw++);
+    if (diff != 0)
+      return diff < 0 ? -1 : 1;
+  }
+  if (otherString->count_ == thiz->count_)
+    return 0;
+  else if (otherString->count_ > thiz->count_)
+    return -1;
+  else
+    return 1;
+}
+
+
+KChar Kotlin_String_get(KString thiz, KInt index) {
+  if (static_cast<uint32_t>(index) >= thiz->count_) {
+    ThrowArrayIndexOutOfBoundsException();
+  }
+  return *CharArrayAddressOfElementAt(thiz, index);
+}
+
+KInt Kotlin_String_getStringLength(KString thiz) {
+  return thiz->count_;
+}
+
+const char* unsafeByteArrayAsCString(KConstRef thiz, KInt start, KInt size) {
+  const ArrayHeader* array = thiz->array();
+  RuntimeAssert(array->type_info() == theByteArrayTypeInfo, "Must use a byte array");
+  return reinterpret_cast<const char*>(ByteArrayAddressOfElementAt(array, start));
+}
+
+OBJ_GETTER(Kotlin_ByteArray_unsafeStringFromUtf8OrThrow, KConstRef thiz, KInt start, KInt size) {
+  if (size == 0) {
+    RETURN_RESULT_OF0(TheEmptyString);
+  }
+  const char* rawString = unsafeByteArrayAsCString(thiz, start, size);
+  RETURN_RESULT_OF(utf8ToUtf16OrThrow, rawString, size);
+}
+
+OBJ_GETTER(Kotlin_ByteArray_unsafeStringFromUtf8, KConstRef thiz, KInt start, KInt size) {
+  if (size == 0) {
+    RETURN_RESULT_OF0(TheEmptyString);
+  }
+  const char* rawString = unsafeByteArrayAsCString(thiz, start, size);
+  RETURN_RESULT_OF(utf8ToUtf16, rawString, size);
+}
+
+OBJ_GETTER(Kotlin_String_unsafeStringToUtf8, KString thiz, KInt start, KInt size) {
+  RETURN_RESULT_OF(unsafeUtf16ToUtf8Impl<utf8::with_replacement::utf16to8>, thiz, start, size);
+}
+
+OBJ_GETTER(Kotlin_String_unsafeStringToUtf8OrThrow, KString thiz, KInt start, KInt size) {
+  RETURN_RESULT_OF(unsafeUtf16ToUtf8Impl<utf16toUtf8OrThrow>, thiz, start, size);
+}
+
+KInt Kotlin_StringBuilder_insertString(KRef builder, KInt distIndex, KString fromString, KInt sourceIndex, KInt count) {
+  auto toArray = builder->array();
+  RuntimeAssert(sourceIndex >= 0 && sourceIndex + count <= fromString->count_, "must be true");
+  RuntimeAssert(distIndex >= 0 && distIndex + count <= toArray->count_, "must be true");
+  memcpy(CharArrayAddressOfElementAt(toArray, distIndex),
+         CharArrayAddressOfElementAt(fromString, sourceIndex),
+         count * sizeof(KChar));
+  return count;
+}
+
+KInt Kotlin_StringBuilder_insertInt(KRef builder, KInt position, KInt value) {
+  auto toArray = builder->array();
+  RuntimeAssert(toArray->count_ >= 11 + position, "must be true");
+  char cstring[12];
+  auto length = konan::snprintf(cstring, sizeof(cstring), "%d", value);
+  auto* from = &cstring[0];
+  auto* to = CharArrayAddressOfElementAt(toArray, position);
+  auto* end = from + length;
+  while (from != end) {
+    *to++ = *from++;
+  }
+  return length;
+}
+
 
 KBoolean Kotlin_String_equals(KString thiz, KConstRef other) {
   if (other == nullptr || other->type_info() != theStringTypeInfo) return false;
@@ -866,58 +954,12 @@ KBoolean Kotlin_String_equalsIgnoreCase(KString thiz, KConstRef other) {
   return true;
 }
 
-OBJ_GETTER(Kotlin_String_replace, KString thiz, KChar oldChar, KChar newChar,
-           KBoolean ignoreCase) {
-  auto count = thiz->count_;
-  ArrayHeader* result = AllocArrayInstance(
-      theStringTypeInfo, count, OBJ_RESULT)->array();
-  const KChar* thizRaw = CharArrayAddressOfElementAt(thiz, 0);
-  KChar* resultRaw = CharArrayAddressOfElementAt(result, 0);
-  if (ignoreCase) {
-    KChar oldCharLower = towlower_Konan(oldChar);
-    for (KInt index = 0; index < count; ++index) {
-      KChar thizChar = *thizRaw++;
-      *resultRaw++ = towlower_Konan(thizChar) == oldCharLower ? newChar : thizChar;
-    }
-  } else {
-    for (KInt index = 0; index < count; ++index) {
-      KChar thizChar = *thizRaw++;
-      *resultRaw++ = thizChar == oldChar ? newChar : thizChar;
-    }
-  }
-  RETURN_OBJ(result->obj());
-}
-
-OBJ_GETTER(Kotlin_String_toUpperCase, KString thiz) {
-  auto count = thiz->count_;
-  ArrayHeader* result = AllocArrayInstance(
-      theStringTypeInfo, count, OBJ_RESULT)->array();
-  const KChar* thizRaw = CharArrayAddressOfElementAt(thiz, 0);
-  KChar* resultRaw = CharArrayAddressOfElementAt(result, 0);
-  for (KInt index = 0; index < count; ++index) {
-    *resultRaw++ = towupper_Konan(*thizRaw++);
-  }
-  RETURN_OBJ(result->obj());
-}
-
-OBJ_GETTER(Kotlin_String_toLowerCase, KString thiz) {
-  auto count = thiz->count_;
-  ArrayHeader* result = AllocArrayInstance(
-      theStringTypeInfo, count, OBJ_RESULT)->array();
-  const KChar* thizRaw = CharArrayAddressOfElementAt(thiz, 0);
-  KChar* resultRaw = CharArrayAddressOfElementAt(result, 0);
-  for (KInt index = 0; index < count; ++index) {
-    *resultRaw++ = towlower_Konan(*thizRaw++);
-  }
-  RETURN_OBJ(result->obj());
-}
-
 KBoolean Kotlin_String_regionMatches(KString thiz, KInt thizOffset,
                                      KString other, KInt otherOffset,
                                      KInt length, KBoolean ignoreCase) {
   if (length < 0 ||
-      thizOffset < 0 || length > thiz->count_ - thizOffset ||
-      otherOffset < 0 || length > other->count_ - otherOffset) {
+      thizOffset < 0 || length > static_cast<KInt>(thiz->count_) - thizOffset ||
+      otherOffset < 0 || length > static_cast<KInt>(other->count_) - otherOffset) {
     return false;
   }
   const KChar* thizRaw = CharArrayAddressOfElementAt(thiz, thizOffset);
@@ -932,13 +974,6 @@ KBoolean Kotlin_String_regionMatches(KString thiz, KInt thizOffset,
     }
   }
   return true;
-}
-
-KBoolean Kotlin_CharSequence_regionMatches(KString thiz, KInt thizOffset,
-                                           KString other, KInt otherOffset,
-                                           KInt length, KBoolean ignoreCase) {
-  return Kotlin_String_regionMatches(thiz, thizOffset, other, otherOffset,
-                                     length, ignoreCase);
 }
 
 KBoolean Kotlin_Char_isDefined(KChar ch) {
@@ -996,6 +1031,10 @@ KChar Kotlin_Char_toUpperCase(KChar ch) {
   return towupper_Konan(ch);
 }
 
+KInt Kotlin_Char_getType(KChar ch) {
+  return getType(ch);
+}
+
 constexpr KInt digits[] = {
   0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
   -1, -1, -1, -1, -1, -1, -1,
@@ -1027,7 +1066,10 @@ KInt Kotlin_Char_digitOfChecked(KChar ch, KInt radix) {
 }
 
 KInt Kotlin_String_indexOfChar(KString thiz, KChar ch, KInt fromIndex) {
-  if (fromIndex < 0 || fromIndex > thiz->count_) {
+  if (fromIndex < 0) {
+    fromIndex = 0;
+  }
+  if (fromIndex > thiz->count_) {
     return -1;
   }
   KInt count = thiz->count_;
@@ -1040,8 +1082,11 @@ KInt Kotlin_String_indexOfChar(KString thiz, KChar ch, KInt fromIndex) {
 }
 
 KInt Kotlin_String_lastIndexOfChar(KString thiz, KChar ch, KInt fromIndex) {
-  if (fromIndex < 0 || fromIndex > thiz->count_ || thiz->count_ == 0) {
+  if (fromIndex < 0 || thiz->count_ == 0) {
     return -1;
+  }
+  if (fromIndex >= thiz->count_) {
+    fromIndex = thiz->count_ - 1;
   }
   KInt count = thiz->count_;
   KInt index = fromIndex;
@@ -1055,8 +1100,13 @@ KInt Kotlin_String_lastIndexOfChar(KString thiz, KChar ch, KInt fromIndex) {
 
 // TODO: or code up Knuth-Moris-Pratt.
 KInt Kotlin_String_indexOfString(KString thiz, KString other, KInt fromIndex) {
-  if (fromIndex < 0 || fromIndex > thiz->count_ ||
-      other->count_ > thiz->count_ - fromIndex) {
+  if (fromIndex < 0) {
+    fromIndex = 0;
+  }
+  if (fromIndex >= thiz->count_) {
+    return (other->count_ == 0) ? thiz->count_ : -1;
+  }
+  if (other->count_ > static_cast<KInt>(thiz->count_) - fromIndex) {
     return -1;
   }
   // An empty string can be always found.
@@ -1066,8 +1116,8 @@ KInt Kotlin_String_indexOfString(KString thiz, KString other, KInt fromIndex) {
   KInt count = thiz->count_;
   const KChar* thizRaw = CharArrayAddressOfElementAt(thiz, fromIndex);
   const KChar* otherRaw = CharArrayAddressOfElementAt(other, 0);
-  void* result = memmem(thizRaw, (thiz->count_ - fromIndex) * sizeof(KChar),
-                        otherRaw, other->count_ * sizeof(KChar));
+  void* result = konan::memmem(thizRaw, (thiz->count_ - fromIndex) * sizeof(KChar),
+                               otherRaw, other->count_ * sizeof(KChar));
   if (result == nullptr) return -1;
 
   return (reinterpret_cast<intptr_t>(result) - reinterpret_cast<intptr_t>(
@@ -1075,35 +1125,33 @@ KInt Kotlin_String_indexOfString(KString thiz, KString other, KInt fromIndex) {
 }
 
 KInt Kotlin_String_lastIndexOfString(KString thiz, KString other, KInt fromIndex) {
-  if (fromIndex < 0 || fromIndex > thiz->count_ || thiz->count_ == 0 ||
-      other->count_ > thiz->count_ - fromIndex) {
-    return -1;
-  }
   KInt count = thiz->count_;
   KInt otherCount = other->count_;
-  KInt start = fromIndex;
-  if (otherCount <= count && start >= 0) {
-    if (otherCount > 0) {
-      if (fromIndex > count - otherCount)
-        start = count - otherCount;
-      KChar firstChar = *CharArrayAddressOfElementAt(other, 0);
-      while (true) {
-        KInt candidate = Kotlin_String_lastIndexOfChar(thiz, firstChar, start);
-        if (candidate == -1) return -1;
-        KInt offsetThiz = candidate;
-        KInt offsetOther = 0;
-        while (++offsetOther < otherCount &&
-               *CharArrayAddressOfElementAt(thiz, ++offsetThiz) ==
-               *CharArrayAddressOfElementAt(other, offsetOther)) {}
-        if (offsetOther == otherCount) {
-          return candidate;
-        }
-        start = candidate - 1;
-      }
-    }
-    return start < count ? start : count;
+
+  if (fromIndex < 0 || otherCount > count) {
+    return -1;
   }
-  return -1;
+  if (otherCount == 0) {
+    return fromIndex < count ? fromIndex : count;
+  }
+
+  KInt start = fromIndex;
+  if (fromIndex > count - otherCount)
+    start = count - otherCount;
+  KChar firstChar = *CharArrayAddressOfElementAt(other, 0);
+  while (true) {
+    KInt candidate = Kotlin_String_lastIndexOfChar(thiz, firstChar, start);
+    if (candidate == -1) return -1;
+    KInt offsetThiz = candidate;
+    KInt offsetOther = 0;
+    while (++offsetOther < otherCount &&
+           *CharArrayAddressOfElementAt(thiz, ++offsetThiz) ==
+           *CharArrayAddressOfElementAt(other, offsetOther)) {}
+    if (offsetOther == otherCount) {
+      return candidate;
+    }
+    start = candidate - 1;
+  }
 }
 
 KInt Kotlin_String_hashCode(KString thiz) {
@@ -1114,56 +1162,16 @@ KInt Kotlin_String_hashCode(KString thiz) {
     CharArrayAddressOfElementAt(thiz, 0), thiz->count_ * sizeof(KChar));
 }
 
-OBJ_GETTER(Kotlin_String_subSequence, KString thiz, KInt startIndex, KInt endIndex) {
-  if (startIndex < 0 || endIndex > thiz->count_ || startIndex > endIndex) {
-    // TODO: is it correct exception?
-    ThrowArrayIndexOutOfBoundsException();
-  }
-  if (startIndex == endIndex) {
-    RETURN_RESULT_OF0(TheEmptyString);
-  }
-  KInt length = endIndex - startIndex;
-  ArrayHeader* result = AllocArrayInstance(
-    theStringTypeInfo, length, OBJ_RESULT)->array();
-  memcpy(CharArrayAddressOfElementAt(result, 0),
-         CharArrayAddressOfElementAt(thiz, startIndex),
-         length * sizeof(KChar));
-  RETURN_OBJ(result->obj());
-}
-
-// io/Console.kt
-void Kotlin_io_Console_print(KString message) {
+const KChar* Kotlin_String_utf16pointer(KString message) {
   RuntimeAssert(message->type_info() == theStringTypeInfo, "Must use a string");
-  // TODO: system stdout must be aware about UTF-8.
   const KChar* utf16 = CharArrayAddressOfElementAt(message, 0);
-  std::string utf8;
-  utf8::utf16to8(utf16, utf16 + message->count_, back_inserter(utf8));
-  write(STDOUT_FILENO, utf8.c_str(), utf8.size());
+  return utf16;
 }
 
-void Kotlin_io_Console_println(KString message) {
-  Kotlin_io_Console_print(message);
-  Kotlin_io_Console_println0();
+KInt Kotlin_String_utf16length(KString message) {
+  RuntimeAssert(message->type_info() == theStringTypeInfo, "Must use a string");
+  return message->count_ * sizeof(KChar);
 }
 
-void Kotlin_io_Console_println0() {
-  write(STDOUT_FILENO, "\n", 1);
-}
-
-OBJ_GETTER0(Kotlin_io_Console_readLine) {
-  char data[4096];
-  if (!fgets(data, sizeof(data) - 1, stdin)) {
-    return nullptr;
-  }
-  RETURN_RESULT_OF(CreateStringFromCString, data);
-}
-
-KFloat Kotlin_String_parseFloat(KString value) {
-  return parseFloat(value);
-}
-
-KDouble Kotlin_String_parseDouble(KString value) {
-  return parseDouble(value);
-}
 
 } // extern "C"
