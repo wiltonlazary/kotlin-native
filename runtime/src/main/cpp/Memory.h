@@ -236,9 +236,9 @@ struct ContainerHeader {
 
   inline void setColorUnlessGreen(unsigned color) {
     // TODO: do we need atomic color update?
-    unsigned objectCount_ = objectCount_;
-    if ((objectCount_ & CONTAINER_TAG_GC_COLOR_MASK) != CONTAINER_TAG_GC_GREEN)
-        objectCount_ = (objectCount_ & ~CONTAINER_TAG_GC_COLOR_MASK) | color;
+    unsigned objectCount = objectCount_;
+    if ((objectCount & CONTAINER_TAG_GC_COLOR_MASK) != CONTAINER_TAG_GC_GREEN)
+        objectCount_ = (objectCount & ~CONTAINER_TAG_GC_COLOR_MASK) | color;
   }
 
   inline bool buffered() const {
@@ -315,16 +315,20 @@ ALWAYS_INLINE bool hasPointerBits(T* ptr, unsigned bits) {
 struct MetaObjHeader {
   // Pointer to the type info. Must be first, to match ArrayHeader and ObjHeader layout.
   const TypeInfo* typeInfo_;
-  // Strong reference to the counter object.
-  ObjHeader* counter_;
   // Container pointer.
   ContainerHeader* container_;
+
 #ifdef KONAN_OBJC_INTEROP
   void* associatedObject_;
 #endif
 
   // Flags for the object state.
   int32_t flags_;
+
+  struct {
+    // Strong reference to the counter object.
+    ObjHeader* counter_;
+  } WeakReference;
 };
 
 // Header of every object.
@@ -358,6 +362,12 @@ struct ObjHeader {
     if ((bits & OBJECT_TAG_PERMANENT_CONTAINER) != 0)
       return nullptr;
     return (reinterpret_cast<MetaObjHeader*>(clearPointerBits(typeInfoOrMeta_, OBJECT_TAG_MASK)))->container_;
+  }
+
+  inline bool local() const {
+    unsigned bits = getPointerBits(typeInfoOrMeta_, OBJECT_TAG_MASK);
+    return (bits & (OBJECT_TAG_PERMANENT_CONTAINER | OBJECT_TAG_NONTRIVIAL_CONTAINER)) ==
+        (OBJECT_TAG_PERMANENT_CONTAINER | OBJECT_TAG_NONTRIVIAL_CONTAINER);
   }
 
   // Unsafe cast to ArrayHeader. Use carefully!
@@ -403,16 +413,16 @@ extern "C" {
    returnType name(__VA_ARGS__) RUNTIME_NOTHROW;         \
    returnType name##Strict(__VA_ARGS__) RUNTIME_NOTHROW; \
    returnType name##Relaxed(__VA_ARGS__) RUNTIME_NOTHROW;
-#define RETURN_OBJ(value) { ObjHeader* obj = value; \
-    UpdateReturnRef(OBJ_RESULT, obj);               \
-    return obj; }
+#define RETURN_OBJ(value) { ObjHeader* __obj = value; \
+    UpdateReturnRef(OBJ_RESULT, __obj);               \
+    return __obj; }
 #define RETURN_RESULT_OF0(name) {       \
-    ObjHeader* obj = name(OBJ_RESULT);  \
-    return obj;                         \
+    ObjHeader* __obj = name(OBJ_RESULT);  \
+    return __obj;                         \
   }
 #define RETURN_RESULT_OF(name, ...) {                   \
-    ObjHeader* result = name(__VA_ARGS__, OBJ_RESULT);  \
-    return result;                                      \
+    ObjHeader* __result = name(__VA_ARGS__, OBJ_RESULT);  \
+    return __result;                                      \
   }
 
 struct MemoryState;
@@ -451,11 +461,11 @@ OBJ_GETTER(InitInstance,
     ObjHeader** location, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*));
 
 OBJ_GETTER(InitSharedInstanceStrict,
-    ObjHeader** location, ObjHeader** localLocation, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*));
+    ObjHeader** location, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*));
 OBJ_GETTER(InitSharedInstanceRelaxed,
-    ObjHeader** location, ObjHeader** localLocation, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*));
+    ObjHeader** location, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*));
 OBJ_GETTER(InitSharedInstance,
-    ObjHeader** location, ObjHeader** localLocation, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*));
+    ObjHeader** location, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*));
 
 // Weak reference operations.
 // Atomically clears counter object reference.
@@ -491,7 +501,9 @@ MODEL_VARIANTS(void, SetStackRef, ObjHeader** location, const ObjHeader* object)
 // Sets heap location.
 MODEL_VARIANTS(void, SetHeapRef, ObjHeader** location, const ObjHeader* object);
 // Zeroes heap location.
-void ZeroHeapRef(ObjHeader** location);
+void ZeroHeapRef(ObjHeader** location) RUNTIME_NOTHROW;
+// Zeroes an array.
+void ZeroArrayRefs(ArrayHeader* array) RUNTIME_NOTHROW;
 // Zeroes stack location.
 MODEL_VARIANTS(void, ZeroStackRef, ObjHeader** location);
 // Updates stack location.
@@ -504,11 +516,13 @@ MODEL_VARIANTS(void, UpdateHeapRefIfNull, ObjHeader** location, const ObjHeader*
 MODEL_VARIANTS(void, UpdateReturnRef, ObjHeader** returnSlot, const ObjHeader* object);
 // Compares and swaps reference with taken lock.
 OBJ_GETTER(SwapHeapRefLocked,
-    ObjHeader** location, ObjHeader* expectedValue, ObjHeader* newValue, int32_t* spinlock) RUNTIME_NOTHROW;
+    ObjHeader** location, ObjHeader* expectedValue, ObjHeader* newValue, int32_t* spinlock,
+    int32_t* cookie) RUNTIME_NOTHROW;
 // Sets reference with taken lock.
-void SetHeapRefLocked(ObjHeader** location, ObjHeader* newValue, int32_t* spinlock) RUNTIME_NOTHROW;
+void SetHeapRefLocked(ObjHeader** location, ObjHeader* newValue, int32_t* spinlock,
+    int32_t* cookie) RUNTIME_NOTHROW;
 // Reads reference with taken lock.
-OBJ_GETTER(ReadHeapRefLocked, ObjHeader** location, int32_t* spinlock) RUNTIME_NOTHROW;
+OBJ_GETTER(ReadHeapRefLocked, ObjHeader** location, int32_t* spinlock, int32_t* cookie) RUNTIME_NOTHROW;
 // Called on frame enter, if it has object slots.
 MODEL_VARIANTS(void, EnterFrame, ObjHeader** start, int parameters, int count);
 // Called on frame leave, if it has object slots.
@@ -527,10 +541,23 @@ OBJ_GETTER(DerefStablePointer, void*) RUNTIME_NOTHROW;
 OBJ_GETTER(AdoptStablePointer, void*) RUNTIME_NOTHROW;
 // Check mutability state.
 void MutationCheck(ObjHeader* obj);
+void CheckLifetimesConstraint(ObjHeader* obj, ObjHeader* pointee) RUNTIME_NOTHROW;
 // Freeze object subgraph.
 void FreezeSubgraph(ObjHeader* obj);
 // Ensure this object shall block freezing.
 void EnsureNeverFrozen(ObjHeader* obj);
+// Add TLS object storage, called by the generated code.
+void AddTLSRecord(MemoryState* memory, void** key, int size) RUNTIME_NOTHROW;
+// Clear TLS object storage, called by the generated code.
+void ClearTLSRecord(MemoryState* memory, void** key) RUNTIME_NOTHROW;
+// Lookup element in TLS object storage.
+ObjHeader** LookupTLS(void** key, int index) RUNTIME_NOTHROW;
+
+// APIs for the async GC.
+void GC_RegisterWorker(void* worker) RUNTIME_NOTHROW;
+void GC_UnregisterWorker(void* worker) RUNTIME_NOTHROW;
+void GC_CollectorCallback(void* worker) RUNTIME_NOTHROW;
+
 #ifdef __cplusplus
 }
 #endif
@@ -577,6 +604,7 @@ class ObjHolder {
    ObjHeader* obj_;
 };
 
+//! TODO Follow the Rule of Zero to prevent dangling on unintented copy ctor
 class ExceptionObjHolder {
  public:
    explicit ExceptionObjHolder(const ObjHeader* obj) {

@@ -13,6 +13,7 @@ import org.jetbrains.kotlin.backend.konan.descriptors.kotlinNativeInternal
 import org.jetbrains.kotlin.backend.konan.llvm.findMainEntryPoint
 import org.jetbrains.kotlin.backend.konan.lower.TestProcessor
 import org.jetbrains.kotlin.builtins.KotlinBuiltIns
+import org.jetbrains.kotlin.builtins.StandardNames
 import org.jetbrains.kotlin.builtins.UnsignedType
 import org.jetbrains.kotlin.config.coroutinesIntrinsicsPackageFqName
 import org.jetbrains.kotlin.config.coroutinesPackageFqName
@@ -20,6 +21,7 @@ import org.jetbrains.kotlin.config.languageVersionSettings
 import org.jetbrains.kotlin.descriptors.*
 import org.jetbrains.kotlin.incremental.components.NoLookupLocation
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
+import org.jetbrains.kotlin.ir.descriptors.IrBuiltIns
 import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
 import org.jetbrains.kotlin.ir.symbols.IrFunctionSymbol
 import org.jetbrains.kotlin.ir.symbols.IrSimpleFunctionSymbol
@@ -42,10 +44,11 @@ internal class KonanIr(context: Context, irModule: IrModuleFragment): Ir<Context
 
 internal class KonanSymbols(
         context: Context,
+        irBuiltIns: IrBuiltIns,
         private val symbolTable: SymbolTable,
         lazySymbolTable: ReferenceSymbolTable,
         val functionIrClassFactory: BuiltInFictitiousFunctionIrClassFactory
-): Symbols<Context>(context, lazySymbolTable) {
+): Symbols<Context>(context, irBuiltIns, symbolTable) {
 
     val entryPoint = findMainEntryPoint(context)?.let { symbolTable.referenceSimpleFunction(it) }
 
@@ -53,19 +56,20 @@ internal class KonanSymbols(
 
     val nothing = symbolTable.referenceClass(builtIns.nothing)
     val throwable = symbolTable.referenceClass(builtIns.throwable)
-    val string = symbolTable.referenceClass(builtIns.string)
     val enum = symbolTable.referenceClass(builtIns.enum)
     val nativePtr = symbolTable.referenceClass(context.nativePtr)
     val nativePointed = symbolTable.referenceClass(context.interopBuiltIns.nativePointed)
     val nativePtrType = nativePtr.typeWith(arguments = emptyList())
     val nonNullNativePtr = symbolTable.referenceClass(context.nonNullNativePtr)
 
+    val immutableBlobOf = symbolTable.referenceSimpleFunction(context.immutableBlobOf)
+
     private fun unsignedClass(unsignedType: UnsignedType): IrClassSymbol = classById(unsignedType.classId)
 
-    val uByte = unsignedClass(UnsignedType.UBYTE)
-    val uShort = unsignedClass(UnsignedType.USHORT)
-    val uInt = unsignedClass(UnsignedType.UINT)
-    val uLong = unsignedClass(UnsignedType.ULONG)
+    override val uByte = unsignedClass(UnsignedType.UBYTE)
+    override val uShort = unsignedClass(UnsignedType.USHORT)
+    override val uInt = unsignedClass(UnsignedType.UINT)
+    override val uLong = unsignedClass(UnsignedType.ULONG)
 
     val signedIntegerClasses = setOf(byte, short, int, long)
     val unsignedIntegerClasses = setOf(uByte, uShort, uInt, uLong)
@@ -130,6 +134,8 @@ internal class KonanSymbols(
     val interopCValueRead = symbolTable.referenceSimpleFunction(context.interopBuiltIns.cValueRead)
     val interopAllocType = symbolTable.referenceSimpleFunction(context.interopBuiltIns.allocType)
 
+    val interopTypeOf = symbolTable.referenceSimpleFunction(context.interopBuiltIns.typeOf)
+
     val interopCPointerGetRawValue = symbolTable.referenceSimpleFunction(context.interopBuiltIns.cPointerGetRawValue)
 
     val interopAllocObjCObject = symbolTable.referenceSimpleFunction(context.interopBuiltIns.allocObjCObject)
@@ -168,22 +174,48 @@ internal class KonanSymbols(
     val interopObjCObjectRawValueGetter =
             symbolTable.referenceSimpleFunction(context.interopBuiltIns.objCObjectRawPtr)
 
+    val interopNativePointedRawPtrGetter =
+            symbolTable.referenceSimpleFunction(context.interopBuiltIns.nativePointedRawPtrGetter)
+
+    val interopCPointerRawValue =
+            symbolTable.referenceProperty(context.interopBuiltIns.cPointerRawValue)
+
     val interopInterpretObjCPointer =
             symbolTable.referenceSimpleFunction(context.interopBuiltIns.interpretObjCPointer)
 
     val interopInterpretObjCPointerOrNull =
             symbolTable.referenceSimpleFunction(context.interopBuiltIns.interpretObjCPointerOrNull)
 
+    val interopInterpretNullablePointed =
+            symbolTable.referenceSimpleFunction(context.interopBuiltIns.interpretNullablePointed)
+
+    val interopInterpretCPointer =
+            symbolTable.referenceSimpleFunction(context.interopBuiltIns.interpretCPointer)
+
     val interopCreateNSStringFromKString =
             symbolTable.referenceSimpleFunction(context.interopBuiltIns.CreateNSStringFromKString)
 
+    val createForeignException = interopFunction("CreateForeignException")
+
     val interopObjCGetSelector = interopFunction("objCGetSelector")
+
+    val interopCEnumVar = interopClass("CEnumVar")
+
+    val nativeMemUtils = symbolTable.referenceClass(context.interopBuiltIns.nativeMemUtils)
+
+    val readBits = interopFunction("readBits")
+    val writeBits = interopFunction("writeBits")
 
     val objCExportTrapOnUndeclaredException =
             symbolTable.referenceSimpleFunction(context.builtIns.kotlinNativeInternal.getContributedFunctions(
                     Name.identifier("trapOnUndeclaredException"),
                     NoLookupLocation.FROM_BACKEND
             ).single())
+
+    val objCExportResumeContinuation = internalFunction("resumeContinuation")
+    val objCExportResumeContinuationWithException = internalFunction("resumeContinuationWithException")
+    val objCExportGetCoroutineSuspended = internalFunction("getCoroutineSuspended")
+    val objCExportInterceptedContinuation = internalFunction("interceptedContinuation")
 
     val getNativeNullPtr = symbolTable.referenceSimpleFunction(context.getNativeNullPtr)
 
@@ -201,7 +233,11 @@ internal class KonanSymbols(
             ) as ClassDescriptor
     )
 
-    val executeImpl = symbolTable.referenceSimpleFunction(context.interopBuiltIns.executeImplFunction)
+    val executeImpl = symbolTable.referenceSimpleFunction(
+            builtIns.builtInsModule.getPackage(FqName("kotlin.native.concurrent")).memberScope
+                    .getContributedFunctions(Name.identifier("executeImpl"), NoLookupLocation.FROM_BACKEND)
+                    .single()
+    )
 
     val areEqualByValue = context.getKonanInternalFunctions("areEqualByValue").map {
         symbolTable.referenceSimpleFunction(it)
@@ -219,19 +255,26 @@ internal class KonanSymbols(
 
     val throwArithmeticException = internalFunction("ThrowArithmeticException")
 
-    override val ThrowNullPointerException = internalFunction("ThrowNullPointerException")
+    val throwIndexOutOfBoundsException = internalFunction("ThrowIndexOutOfBoundsException")
 
-    override val ThrowNoWhenBranchMatchedException = internalFunction("ThrowNoWhenBranchMatchedException")
+    override val throwNullPointerException = internalFunction("ThrowNullPointerException")
 
-    override val ThrowTypeCastException = internalFunction("ThrowTypeCastException")
+    override val throwNoWhenBranchMatchedException = internalFunction("ThrowNoWhenBranchMatchedException")
+
+    override val throwTypeCastException = internalFunction("ThrowTypeCastException")
+
+    override val throwKotlinNothingValueException  = internalFunction("ThrowKotlinNothingValueException")
 
     val throwClassCastException = internalFunction("ThrowClassCastException")
 
     val throwInvalidReceiverTypeException = internalFunction("ThrowInvalidReceiverTypeException")
     val throwIllegalStateException = internalFunction("ThrowIllegalStateException")
     val throwIllegalStateExceptionWithMessage = internalFunction("ThrowIllegalStateExceptionWithMessage")
+    val throwIllegalArgumentException = internalFunction("ThrowIllegalArgumentException")
+    val throwIllegalArgumentExceptionWithMessage = internalFunction("ThrowIllegalArgumentExceptionWithMessage")
 
-    override val ThrowUninitializedPropertyAccessException = internalFunction("ThrowUninitializedPropertyAccessException")
+
+    override val throwUninitializedPropertyAccessException = internalFunction("ThrowUninitializedPropertyAccessException")
 
     override val stringBuilder = symbolTable.referenceClass(
             builtInsPackage("kotlin", "text").getContributedClassifier(
@@ -266,6 +309,7 @@ internal class KonanSymbols(
                 .singleOrNull {
                     it.valueParameters.isEmpty()
                             && it.extensionReceiverParameter?.type?.constructor?.declarationDescriptor == descriptor
+                            && it.extensionReceiverParameter?.type?.isMarkedNullable == false
                             && !it.isExpect
                 } ?: error(descriptor.toString())
         return symbolTable.referenceSimpleFunction(functionDescriptor)
@@ -279,7 +323,7 @@ internal class KonanSymbols(
     }
     
     val copyInto = arrays.map { symbol ->
-        val packageViewDescriptor = builtIns.builtInsModule.getPackage(KotlinBuiltIns.COLLECTIONS_PACKAGE_FQ_NAME)
+        val packageViewDescriptor = builtIns.builtInsModule.getPackage(StandardNames.COLLECTIONS_PACKAGE_FQ_NAME)
         val functionDescriptor = packageViewDescriptor.memberScope
                 .getContributedFunctions(Name.identifier("copyInto"), NoLookupLocation.FROM_BACKEND)
                 .single {
@@ -368,6 +412,8 @@ internal class KonanSymbols(
                     .filterNot { it.isExpect }.single().getter!!
     )
 
+    val cancellationException = topLevelClass(KonanFqNames.cancellationException)
+
     val kotlinResult = topLevelClass("kotlin.Result")
 
     val kotlinResultGetOrThrow = symbolTable.referenceSimpleFunction(
@@ -377,6 +423,8 @@ internal class KonanSymbols(
                         it.extensionReceiverParameter?.type?.constructor?.declarationDescriptor == kotlinResult.descriptor
                     }
     )
+
+    override val functionAdapter = symbolTable.referenceClass(context.getKonanInternalClass("FunctionAdapter"))
 
     val refClass = symbolTable.referenceClass(context.getKonanInternalClass("Ref"))
 
@@ -477,13 +525,13 @@ internal class KonanSymbols(
                     .getContributedClassifier(Name.identifier(name), NoLookupLocation.FROM_BACKEND) as ClassDescriptor
     )
 
-    override fun functionN(n: Int) = functionIrClassFactory.function(n).symbol
+    override fun functionN(n: Int) = functionIrClassFactory.functionN(n).symbol
 
-    override fun suspendFunctionN(n: Int) = functionIrClassFactory.suspendFunction(n).symbol
+    override fun suspendFunctionN(n: Int) = functionIrClassFactory.suspendFunctionN(n).symbol
 
-    fun kFunctionN(n: Int) = functionIrClassFactory.kFunction(n).symbol
+    fun kFunctionN(n: Int) = functionIrClassFactory.kFunctionN(n).symbol
 
-    fun kSuspendFunctionN(n: Int) = functionIrClassFactory.kSuspendFunction(n).symbol
+    fun kSuspendFunctionN(n: Int) = functionIrClassFactory.kSuspendFunctionN(n).symbol
 
     fun getKFunctionType(returnType: IrType, parameterTypes: List<IrType>) =
             kFunctionN(parameterTypes.size).typeWith(parameterTypes + returnType)

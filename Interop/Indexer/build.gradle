@@ -20,7 +20,7 @@ buildscript {
     apply from: "$rootBuildDirectory/gradle/kotlinGradlePlugin.gradle"
 
     dependencies {
-        classpath "org.jetbrains.kotlin:kotlin-stdlib:$buildKotlinVersion"
+        classpath "org.jetbrains.kotlin:kotlin-stdlib:$kotlinVersion"
         classpath "org.jetbrains.kotlin:kotlin-native-shared:$konanVersion"
     }
 }
@@ -118,7 +118,7 @@ repositories {
 }
 
 dependencies {
-    compile "org.jetbrains.kotlin:kotlin-stdlib:$buildKotlinVersion"
+    compile "org.jetbrains.kotlin:kotlin-stdlib:$kotlinVersion"
     compile project(':Interop:Runtime')
 }
 
@@ -138,6 +138,12 @@ kotlinNativeInterop {
         linkerOpts ldflags
         genTask.dependsOn libclangextTask
         genTask.inputs.dir libclangextDir
+    }
+}
+
+compileKotlin {
+    kotlinOptions {
+        allWarningsAsErrors=true
     }
 }
 

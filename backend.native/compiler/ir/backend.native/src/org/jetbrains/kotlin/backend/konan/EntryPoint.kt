@@ -5,18 +5,18 @@
 
 package org.jetbrains.kotlin.backend.konan
 
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedSimpleFunctionDescriptor
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedValueParameterDescriptor
 import org.jetbrains.kotlin.backend.common.lower.createIrBuilder
 import org.jetbrains.kotlin.backend.common.lower.irBlockBody
 import org.jetbrains.kotlin.backend.konan.ir.buildSimpleAnnotation
 import org.jetbrains.kotlin.descriptors.Modality
-import org.jetbrains.kotlin.descriptors.Visibilities
+import org.jetbrains.kotlin.descriptors.DescriptorVisibilities
 import org.jetbrains.kotlin.ir.builders.*
 import org.jetbrains.kotlin.ir.declarations.IrDeclarationOrigin
 import org.jetbrains.kotlin.ir.declarations.IrFunction
 import org.jetbrains.kotlin.ir.declarations.impl.IrFunctionImpl
 import org.jetbrains.kotlin.ir.declarations.impl.IrValueParameterImpl
+import org.jetbrains.kotlin.ir.descriptors.WrappedSimpleFunctionDescriptor
+import org.jetbrains.kotlin.ir.descriptors.WrappedValueParameterDescriptor
 import org.jetbrains.kotlin.ir.expressions.impl.IrTryImpl
 import org.jetbrains.kotlin.ir.symbols.impl.IrSimpleFunctionSymbolImpl
 import org.jetbrains.kotlin.ir.symbols.impl.IrValueParameterSymbolImpl
@@ -33,16 +33,19 @@ internal fun makeEntryPoint(context: Context): IrFunction {
             IrDeclarationOrigin.DEFINED,
             IrSimpleFunctionSymbolImpl(entryPointDescriptor),
             Name.identifier("Konan_start"),
-            Visibilities.PRIVATE,
+            DescriptorVisibilities.PRIVATE,
             Modality.FINAL,
             context.irBuiltIns.intType,
             isInline = false,
             isExternal = false,
             isTailrec = false,
             isSuspend = false,
-            isExpect = false
+            isExpect = false,
+            isFakeOverride = false,
+            isOperator = false,
+            isInfix = false
     ).also { function ->
-        function.valueParameters.add(WrappedValueParameterDescriptor().let {
+        function.valueParameters = listOf(WrappedValueParameterDescriptor().let {
             IrValueParameterImpl(
                     actualMain.startOffset, actualMain.startOffset,
                     IrDeclarationOrigin.DEFINED,

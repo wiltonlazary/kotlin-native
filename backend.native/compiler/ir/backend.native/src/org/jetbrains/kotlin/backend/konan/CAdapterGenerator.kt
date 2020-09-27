@@ -21,6 +21,8 @@ import org.jetbrains.kotlin.ir.declarations.IrClass
 import org.jetbrains.kotlin.ir.declarations.IrEnumEntry
 import org.jetbrains.kotlin.ir.declarations.IrFunction
 import org.jetbrains.kotlin.ir.util.SymbolTable
+import org.jetbrains.kotlin.ir.util.isEnumClass
+import org.jetbrains.kotlin.ir.util.isEnumEntry
 import org.jetbrains.kotlin.ir.util.referenceFunction
 import org.jetbrains.kotlin.konan.target.*
 import org.jetbrains.kotlin.name.isChildOf
@@ -135,7 +137,7 @@ private fun isExportedClass(descriptor: ClassDescriptor): Boolean {
     return true
 }
 
-private fun AnnotationDescriptor.properValue(key: String) =
+internal fun AnnotationDescriptor.properValue(key: String) =
         this.argumentValue(key)?.toString()?.removeSurrounding("\"")
 
 private fun functionImplName(descriptor: DeclarationDescriptor, default: String, shortName: Boolean): String {
@@ -633,7 +635,7 @@ internal class CAdapterGenerator(val context: Context) : DeclarationDescriptorVi
 
     private val seenPackageFragments = mutableSetOf<PackageFragmentDescriptor>()
     private var currentPackageFragments: List<PackageFragmentDescriptor> = emptyList()
-    private val packageScopes = mutableMapOf<String, ExportedElementScope>()
+    private val packageScopes = mutableMapOf<FqName, ExportedElementScope>()
 
     override fun visitModuleDeclaration(descriptor: ModuleDescriptor, ignored: Void?): Boolean {
         TODO("Shall not be called directly")
@@ -646,8 +648,8 @@ internal class CAdapterGenerator(val context: Context) : DeclarationDescriptorVi
 
     override fun visitPackageFragmentDescriptor(descriptor: PackageFragmentDescriptor, ignored: Void?): Boolean {
         val fqName = descriptor.fqName
-        val name = if (fqName.isRoot) "root" else translateName(fqName.shortName().asString())
-        val packageScope = packageScopes.getOrPut(name) {
+        val packageScope = packageScopes.getOrPut(fqName) {
+            val name = if (fqName.isRoot) "root" else translateName(fqName.shortName().asString())
             val scope = ExportedElementScope(ScopeKind.PACKAGE, name)
             scopes.last().scopes += scope
             scope
@@ -846,6 +848,20 @@ internal class CAdapterGenerator(val context: Context) : DeclarationDescriptorVi
         output("typedef unsigned long long ${prefix}_KULong;")
         output("typedef float              ${prefix}_KFloat;")
         output("typedef double             ${prefix}_KDouble;")
+
+        val typedef_KVector128 = "typedef float __attribute__ ((__vector_size__ (16))) ${prefix}_KVector128;"
+        if (context.config.target.family == Family.MINGW) {
+            // Separate `output` for each line to ensure Windows EOL (LFCR), otherwise generated file will have inconsistent line ending.
+            output("#ifndef _MSC_VER")
+            output(typedef_KVector128)
+            output("#else")
+            output("#include <xmmintrin.h>")
+            output("typedef __m128 ${prefix}_KVector128;")
+            output("#endif")
+        } else {
+            output(typedef_KVector128)
+        }
+
         output("typedef void*              ${prefix}_KNativePtr;")
         output("struct ${prefix}_KType;")
         output("typedef struct ${prefix}_KType ${prefix}_KType;")
@@ -908,7 +924,7 @@ internal class CAdapterGenerator(val context: Context) : DeclarationDescriptorVi
         |KObjHeader* DerefStablePointer(void*, KObjHeader**) RUNTIME_NOTHROW;
         |void* CreateStablePointer(KObjHeader*) RUNTIME_NOTHROW;
         |void DisposeStablePointer(void*) RUNTIME_NOTHROW;
-        |int IsInstance(const KObjHeader*, const KTypeInfo*) RUNTIME_NOTHROW;
+        |${prefix}_KBoolean IsInstance(const KObjHeader*, const KTypeInfo*) RUNTIME_NOTHROW;
         |void EnterFrame(KObjHeader** start, int parameters, int count) RUNTIME_NOTHROW;
         |void LeaveFrame(KObjHeader** start, int parameters, int count) RUNTIME_NOTHROW;
         |void Kotlin_initRuntimeIfNeeded();
@@ -1026,6 +1042,7 @@ internal class CAdapterGenerator(val context: Context) : DeclarationDescriptorVi
             KonanPrimitiveType.FLOAT -> "${prefix}_KFloat"
             KonanPrimitiveType.DOUBLE -> "${prefix}_KDouble"
             KonanPrimitiveType.NON_NULL_NATIVE_PTR -> "void*"
+            KonanPrimitiveType.VECTOR128 -> "${prefix}_KVector128"
         }
     }
 

@@ -30,6 +30,12 @@ internal val CValue<CXType>.kind: CXTypeKind get() = this.useContents { kind }
 
 internal val CValue<CXCursor>.kind: CXCursorKind get() = this.useContents { kind }
 
+internal val CValue<CXCursor>.type: CValue<CXType> get() = clang_getCursorType(this)
+internal val CValue<CXCursor>.spelling: String get() = clang_getCursorSpelling(this).convertAndDispose()
+internal val CValue<CXType>.name: String get() = clang_getTypeSpelling(this).convertAndDispose()
+internal val CXTypeKind.spelling: String get() = clang_getTypeKindSpelling(this).convertAndDispose()
+internal val CXCursorKind.spelling: String get() = clang_getCursorKindSpelling(this).convertAndDispose()
+
 internal fun CValue<CXString>.convertAndDispose(): String {
     try {
         return clang_getCString(this)!!.toKString()
@@ -227,7 +233,7 @@ val Compilation.preambleLines: List<String>
 
 internal fun Appendable.appendPreamble(compilation: Compilation) = this.apply {
     compilation.preambleLines.forEach {
-        this.appendln(it)
+        this.appendLine(it)
     }
 }
 
@@ -334,7 +340,7 @@ fun List<List<String>>.mapFragmentIsCompilable(originalLibrary: CompilationWithP
                     fragmentsToCheck.forEach {
                         it.value.forEach {
                             assert(!it.contains('\n'))
-                            writer.appendln(it)
+                            writer.appendLine(it)
                         }
                     }
                 }

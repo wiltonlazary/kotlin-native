@@ -4,6 +4,8 @@
  */
 package org.jetbrains.kotlin.native.interop.gen
 
+import kotlinx.metadata.klib.KlibModuleMetadata
+import org.jetbrains.kotlin.native.interop.gen.jvm.GenerationMode
 import org.jetbrains.kotlin.native.interop.gen.jvm.InteropConfiguration
 import org.jetbrains.kotlin.native.interop.gen.jvm.KotlinPlatform
 import org.jetbrains.kotlin.native.interop.indexer.*
@@ -16,6 +18,7 @@ class StubIrContext(
         val nativeIndex: NativeIndex,
         val imports: Imports,
         val platform: KotlinPlatform,
+        val generationMode: GenerationMode,
         val libName: String
 ) {
     val libraryForCStubs = configuration.library.copy(
@@ -35,10 +38,15 @@ class StubIrContext(
                     }
     ).precompileHeaders()
 
+    // TODO: Used only for JVM.
     val jvmFileClassName = if (configuration.pkgName.isEmpty()) {
         libName
     } else {
         configuration.pkgName.substringAfterLast('.')
+    }
+
+    val validPackageName = configuration.pkgName.split(".").joinToString(".") {
+        if (it.matches(VALID_PACKAGE_NAME_REGEX)) it else "`$it`"
     }
 
     private val anonymousStructKotlinNames = mutableMapOf<StructDecl, String>()
@@ -84,20 +92,80 @@ class StubIrContext(
 
         // TODO: consider exporting Objective-C class and protocol forward refs.
     }
+
+    companion object {
+        private val VALID_PACKAGE_NAME_REGEX = "[a-zA-Z0-9_.]+".toRegex()
+    }
 }
 
-class StubIrDriver(private val context: StubIrContext) {
-    fun run(outKtFile: File, outCFile: File, entryPoint: String?) {
+class StubIrDriver(
+        private val context: StubIrContext,
+        private val options: DriverOptions
+) {
+    data class DriverOptions(
+            val entryPoint: String?,
+            val moduleName: String,
+            val outCFile: File,
+            val outKtFileCreator: () -> File
+    )
+
+    sealed class Result {
+        object SourceCode : Result()
+
+        class Metadata(val metadata: KlibModuleMetadata): Result()
+    }
+
+    fun run(): Result {
+        val (entryPoint, moduleName, outCFile, outKtFile) = options
+
         val builderResult = StubIrBuilder(context).build()
         val bridgeBuilderResult = StubIrBridgeBuilder(context, builderResult).build()
-        outKtFile.bufferedWriter().use { ktFile ->
-            File(outCFile.absolutePath).bufferedWriter().use { cFile ->
-                StubIrTextEmitter(
-                        context,
-                        builderResult,
-                        bridgeBuilderResult
-                ).emit(ktFile, cFile, entryPoint)
+
+        outCFile.bufferedWriter().use {
+            emitCFile(context, it, entryPoint, bridgeBuilderResult.nativeBridges)
+        }
+
+        return when (context.generationMode) {
+            GenerationMode.SOURCE_CODE -> {
+                emitSourceCode(outKtFile(), builderResult, bridgeBuilderResult)
             }
+            GenerationMode.METADATA -> emitMetadata(builderResult, moduleName, bridgeBuilderResult)
+        }
+    }
+
+    private fun emitSourceCode(
+            outKtFile: File, builderResult: StubIrBuilderResult, bridgeBuilderResult: BridgeBuilderResult
+    ): Result.SourceCode {
+        outKtFile.bufferedWriter().use { ktFile ->
+            StubIrTextEmitter(context, builderResult, bridgeBuilderResult).emit(ktFile)
+        }
+        return Result.SourceCode
+    }
+
+    private fun emitMetadata(
+            builderResult: StubIrBuilderResult, moduleName: String, bridgeBuilderResult: BridgeBuilderResult
+    ) = Result.Metadata(StubIrMetadataEmitter(context, builderResult, moduleName, bridgeBuilderResult).emit())
+
+    private fun emitCFile(context: StubIrContext, cFile: Appendable, entryPoint: String?, nativeBridges: NativeBridges) {
+        val out = { it: String -> cFile.appendLine(it) }
+
+        context.libraryForCStubs.preambleLines.forEach {
+            out(it)
+        }
+        out("")
+
+        out("// NOTE THIS FILE IS AUTO-GENERATED")
+        out("")
+
+        nativeBridges.nativeLines.forEach { out(it) }
+
+        if (entryPoint != null) {
+            out("extern int Konan_main(int argc, char** argv);")
+            out("")
+            out("__attribute__((__used__))")
+            out("int $entryPoint(int argc, char** argv)  {")
+            out("  return Konan_main(argc, argv);")
+            out("}")
         }
     }
 }

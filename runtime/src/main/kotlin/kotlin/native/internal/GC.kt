@@ -30,6 +30,12 @@ object GC {
     external fun collect()
 
     /**
+     * Request global cyclic collector, operation is async and just triggers the collection.
+     */
+    @SymbolName("Kotlin_native_internal_GC_collectCyclic")
+    external fun collectCyclic()
+
+    /**
      * Suspend garbage collection. Release candidates are still collected, but
      * GC algorithm is not executed.
      */
@@ -64,6 +70,14 @@ object GC {
         set(value) = setThreshold(value)
 
     /**
+     * GC allocation threshold, controlling how frequenly GC collect cycles, and how much time
+     * this process takes. Bigger values lead to longer GC pauses, but less GCs.
+     */
+    var collectCyclesThreshold: Long
+        get() = getCollectCyclesThreshold()
+        set(value) = setCollectCyclesThreshold(value)
+
+    /**
      * GC allocation threshold, controlling how many bytes allocated since last
      * collection will trigger new GC.
      */
@@ -78,11 +92,39 @@ object GC {
         get() = getTuneThreshold()
         set(value) = setTuneThreshold(value)
 
+
+    /**
+     * If cyclic collector for atomic references to be deployed.
+     */
+    var cyclicCollectorEnabled: Boolean
+        get() = getCyclicCollectorEnabled()
+        set(value) = setCyclicCollectorEnabled(value)
+
+    /**
+     * Detect cyclic references going via atomic references and return list of cycle-inducing objects
+     * or `null` if the leak detector is not available. Use [Platform.isMemoryLeakCheckerActive] to check
+     * leak detector availability.
+     */
+    @SymbolName("Kotlin_native_internal_GC_detectCycles")
+    external fun detectCycles(): Array<Any>?
+
+    /**
+     * Find a reference cycle including from the given object, `null` if no cycles detected.
+     */
+    @SymbolName("Kotlin_native_internal_GC_findCycle")
+    external fun findCycle(root: Any): Array<Any>?
+
     @SymbolName("Kotlin_native_internal_GC_getThreshold")
     private external fun getThreshold(): Int
 
     @SymbolName("Kotlin_native_internal_GC_setThreshold")
     private external fun setThreshold(value: Int)
+
+    @SymbolName("Kotlin_native_internal_GC_getCollectCyclesThreshold")
+    private external fun getCollectCyclesThreshold(): Long
+
+    @SymbolName("Kotlin_native_internal_GC_setCollectCyclesThreshold")
+    private external fun setCollectCyclesThreshold(value: Long)
 
     @SymbolName("Kotlin_native_internal_GC_getThresholdAllocations")
     private external fun getThresholdAllocations(): Long
@@ -95,4 +137,10 @@ object GC {
 
     @SymbolName("Kotlin_native_internal_GC_setTuneThreshold")
     private external fun setTuneThreshold(value: Boolean)
+
+    @SymbolName("Kotlin_native_internal_GC_getCyclicCollector")
+    private external fun getCyclicCollectorEnabled(): Boolean
+
+    @SymbolName("Kotlin_native_internal_GC_setCyclicCollector")
+    private external fun setCyclicCollectorEnabled(value: Boolean)
 }

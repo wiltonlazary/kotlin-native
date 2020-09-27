@@ -9,6 +9,21 @@ void errorHandler(const char* str) {
   printf("Error handler: %s\n", str);
 }
 
+void testVector128() {
+    int __attribute__ ((__vector_size__ (16))) v4f = __ kotlin.root.getVector128();
+    printf("getVector128 = (%d, %d, %d, %d)\n",  v4f[0],  v4f[1],  v4f[2],  v4f[3]);
+}
+
+// See https://github.com/JetBrains/kotlin-native/issues/3952
+void testGH3952() {
+    T_(gh3952_nested_sync_NestedSync) good = __ kotlin.root.gh3952.nested.sync.NestedSync.NestedSync();
+
+    T_(gh3952_sync_PlainSync) alsoGood = __ kotlin.root.gh3952.sync.PlainSync.PlainSync();
+
+    __ DisposeStablePointer(good.pinned);
+    __ DisposeStablePointer(alsoGood.pinned);
+}
+
 int main(void) {
     T_(Singleton) singleton = __ kotlin.root.Singleton._instance();
     T_(Base) base = __ kotlin.root.Base.Base();
@@ -64,6 +79,12 @@ int main(void) {
     __ kotlin.root.useInlineClasses(42, "bar", base);
 
     __ kotlin.root.testNullableWithNulls(nullableIntNull, nullableUnitNull);
+
+    printf("IsInstance1 = %s\n", __ IsInstance(singleton.pinned, __ kotlin.root.Singleton._type()) ? "PASS" : "FAIL");
+    printf("IsInstance2 = %s\n", !(__ IsInstance(singleton.pinned, __ kotlin.root.Codeable._type())) ? "PASS" : "FAIL");
+
+    testVector128();
+    testGH3952();
 
     __ DisposeStablePointer(singleton.pinned);
     __ DisposeString(string1);

@@ -7,6 +7,7 @@ package kotlin.native.concurrent
 
 import kotlin.native.internal.ExportTypeInfo
 import kotlin.native.internal.Frozen
+import kotlin.native.internal.LeakDetectorCandidate
 import kotlin.native.internal.NoReorderFields
 import kotlin.native.SymbolName
 import kotlinx.cinterop.NativePtr
@@ -204,23 +205,39 @@ public class AtomicNativePtr(private var value_: NativePtr) {
     private external fun getImpl(): NativePtr
 }
 
+
+private fun idString(value: Any) = "${value.hashCode().toUInt().toString(16)}"
+
+private fun debugString(value: Any?): String {
+    if (value == null) return "null"
+    return "${value::class.qualifiedName}: ${idString(value)}"
+}
+
 /**
  * An atomic reference to a frozen Kotlin object. Can be used in concurrent scenarious
- * but frequently shall be of nullable type and be zeroed out (with `compareAndSwap(get(), null)`)
- * once no longer needed. Otherwise memory leak could happen.
+ * but frequently shall be of nullable type and be zeroed out once no longer needed.
+ * Otherwise memory leak could happen. To detect such leaks [kotlin.native.internal.GC.detectCycles]
+ * in debug mode could be helpful.
  */
 @Frozen
+@LeakDetectorCandidate
 @NoReorderFields
-public class AtomicReference<T>(private var value_: T) {
+public class AtomicReference<T> {
+    private var value_: T
+
     // A spinlock to fix potential ARC race.
     private var lock: Int = 0
+
+    // Optimization for speeding up access.
+    private var cookie: Int = 0
 
     /**
      * Creates a new atomic reference pointing to given [ref].
      * @throws InvalidMutabilityException if reference is not frozen.
      */
-    init {
+    constructor(value: T) {
         checkIfFrozen(value)
+        value_ = value
     }
 
     /**
@@ -263,7 +280,8 @@ public class AtomicReference<T>(private var value_: T) {
      *
      * @return string representation of this object
      */
-    public override fun toString(): String = "Atomic reference to $value"
+    public override fun toString(): String =
+            "${debugString(this)} -> ${debugString(value)}"
 
     // Implementation details.
     @SymbolName("Kotlin_AtomicReference_set")
@@ -271,19 +289,23 @@ public class AtomicReference<T>(private var value_: T) {
 
     @SymbolName("Kotlin_AtomicReference_get")
     private external fun getImpl(): Any?
-
 }
-
 
 /**
  * An atomic reference to a Kotlin object. Can be used in concurrent scenarious, but must be frozen first,
- * otherwise behaves as regular box for the value.
+ * otherwise behaves as regular box for the value. If frozen, shall be zeroed out once no longer needed.
+ * Otherwise memory leak could happen. To detect such leaks [kotlin.native.internal.GC.detectCycles]
+ * in debug mode could be helpful.
  */
 @NoReorderFields
+@LeakDetectorCandidate
 @ExportTypeInfo("theFreezableAtomicReferenceTypeInfo")
 public class FreezableAtomicReference<T>(private var value_: T) {
     // A spinlock to fix potential ARC race.
     private var lock: Int = 0
+
+    // Optimization for speeding up access.
+    private var cookie: Int = 0
 
     /**
      * The referenced value.
@@ -342,7 +364,8 @@ public class FreezableAtomicReference<T>(private var value_: T) {
      *
      * @return string representation of this object
      */
-    public override fun toString(): String = "Freezable atomic reference to $value"
+    public override fun toString(): String =
+            "${debugString(this)} -> ${debugString(value)}"
 
     // Implementation details.
     @SymbolName("Kotlin_AtomicReference_set")

@@ -20,20 +20,21 @@ class KonanLibraryLayoutForWriter(
     override val target: KonanTarget
 ) : KonanLibraryLayout, KotlinLibraryLayoutForWriter(libDir)
 
-
 /**
  * Requires non-null [target].
  */
 class KonanLibraryWriterImpl(
         libDir: File,
         moduleName: String,
-        versions: KonanLibraryVersioning,
+        versions: KotlinLibraryVersioning,
         target: KonanTarget,
+        builtInsPlatform: BuiltInsPlatform,
         nopack: Boolean = false,
+        shortName: String? = null,
 
         val layout: KonanLibraryLayoutForWriter = KonanLibraryLayoutForWriter(libDir, target),
 
-        base: BaseWriter = BaseWriterImpl(layout, moduleName, versions, nopack),
+        base: BaseWriter = BaseWriterImpl(layout, moduleName, versions, builtInsPlatform, listOf(target.visibleName), nopack, shortName),
         bitcode: BitcodeWriter = BitcodeWriterImpl(layout),
         metadata: MetadataWriter = MetadataWriterImpl(layout),
         ir: IrWriter = IrMonoliticWriterImpl(layout)
@@ -45,20 +46,31 @@ fun buildLibrary(
     included: List<String>,
     linkDependencies: List<KonanLibrary>,
     metadata: SerializedMetadata,
-    ir: SerializedIrModule,
-    versions: KonanLibraryVersioning,
+    ir: SerializedIrModule?,
+    versions: KotlinLibraryVersioning,
     target: KonanTarget,
     output: String,
     moduleName: String,
     nopack: Boolean,
+    shortName: String?,
     manifestProperties: Properties?,
     dataFlowGraph: ByteArray?
 ): KonanLibraryLayout {
 
-    val library = KonanLibraryWriterImpl(File(output), moduleName, versions, target, nopack)
+    val library = KonanLibraryWriterImpl(
+            File(output),
+            moduleName,
+            versions,
+            target,
+            BuiltInsPlatform.NATIVE,
+            nopack,
+            shortName
+    )
 
     library.addMetadata(metadata)
-    library.addIr(ir)
+    if (ir != null) {
+        library.addIr(ir)
+    }
 
     natives.forEach {
         library.addNativeBitcode(it)

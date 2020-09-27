@@ -7,6 +7,7 @@ package org.jetbrains.kotlin.backend.konan.llvm
 
 import kotlinx.cinterop.*
 import llvm.*
+import org.jetbrains.kotlin.backend.konan.Context
 import org.jetbrains.kotlin.descriptors.konan.CompiledKlibModuleOrigin
 
 private val llvmContextHolder = ThreadLocal<LLVMContextRef>()
@@ -110,6 +111,7 @@ internal val int64Type get() = LLVMInt64TypeInContext(llvmContext)!!
 internal val int8TypePtr get() = pointerType(int8Type)
 internal val floatType get() = LLVMFloatTypeInContext(llvmContext)!!
 internal val doubleType get() = LLVMDoubleTypeInContext(llvmContext)!!
+internal val vector128Type get() = LLVMVectorType(floatType, 4)!!
 
 internal val voidType get() = LLVMVoidTypeInContext(llvmContext)!!
 
@@ -203,6 +205,11 @@ internal fun ContextUtils.numParameters(functionType: LLVMTypeRef) : Int {
     return LLVMCountParamTypes(LLVMGetElementType(functionType))
 }
 
+fun extractConstUnsignedInt(value: LLVMValueRef): Long {
+    assert(LLVMIsConstant(value) != 0)
+    return LLVMConstIntGetZExtValue(value)
+}
+
 internal fun ContextUtils.isObjectReturn(functionType: LLVMTypeRef) : Boolean {
     // Note that type is usually function pointer, so we have to dereference it.
     val returnType = LLVMGetReturnType(LLVMGetElementType(functionType))!!
@@ -231,34 +238,61 @@ internal fun getGlobalType(ptrToGlobal: LLVMValueRef): LLVMTypeRef {
     return LLVMGetElementType(ptrToGlobal.type)!!
 }
 
-internal fun ContextUtils.addGlobal(name: String, type: LLVMTypeRef, isExported: Boolean,
-                                    threadLocal: Boolean = false): LLVMValueRef {
+internal fun ContextUtils.addGlobal(name: String, type: LLVMTypeRef, isExported: Boolean): LLVMValueRef {
     if (isExported)
         assert(LLVMGetNamedGlobal(context.llvmModule, name) == null)
-    val result = LLVMAddGlobal(context.llvmModule, type, name)!!
-    if (threadLocal)
-        LLVMSetThreadLocalMode(result, context.llvm.tlsMode)
-    return result
+    return LLVMAddGlobal(context.llvmModule, type, name)!!
 }
 
-internal fun ContextUtils.importGlobal(name: String, type: LLVMTypeRef, origin: CompiledKlibModuleOrigin,
-                                       threadLocal: Boolean = false): LLVMValueRef {
+internal fun ContextUtils.importGlobal(name: String, type: LLVMTypeRef, origin: CompiledKlibModuleOrigin): LLVMValueRef {
 
     context.llvm.imports.add(origin)
 
     val found = LLVMGetNamedGlobal(context.llvmModule, name)
-    if (found != null) {
+    return if (found != null) {
         assert (getGlobalType(found) == type)
         assert (LLVMGetInitializer(found) == null) { "$name is already declared in the current module" }
-        if (threadLocal)
-            assert(LLVMGetThreadLocalMode(found) == context.llvm.tlsMode)
-        return found
+        found
     } else {
-        val result = LLVMAddGlobal(context.llvmModule, type, name)!!
-        if (threadLocal)
-            LLVMSetThreadLocalMode(result, context.llvm.tlsMode)
-        return result
+        addGlobal(name, type, isExported = false)
     }
+}
+
+internal abstract class AddressAccess {
+    abstract fun getAddress(generationContext: FunctionGenerationContext?): LLVMValueRef
+}
+
+internal class GlobalAddressAccess(private val address: LLVMValueRef): AddressAccess() {
+    override fun getAddress(generationContext: FunctionGenerationContext?): LLVMValueRef = address
+}
+
+internal class TLSAddressAccess(
+        private val context: Context, private val index: Int): AddressAccess() {
+
+    override fun getAddress(generationContext: FunctionGenerationContext?): LLVMValueRef {
+        return generationContext!!.call(context.llvm.lookupTLS,
+                listOf(context.llvm.tlsKey, Int32(index).llvm))
+    }
+}
+
+internal fun ContextUtils.addKotlinThreadLocal(name: String, type: LLVMTypeRef): AddressAccess {
+    return if (isObjectType(type)) {
+        val index = context.llvm.tlsCount++
+        TLSAddressAccess(context, index)
+    } else {
+        // TODO: This will break if Workers get decoupled from host threads.
+        GlobalAddressAccess(LLVMAddGlobal(context.llvmModule, type, name)!!.also {
+            LLVMSetThreadLocalMode(it, context.llvm.tlsMode)
+            LLVMSetLinkage(it, LLVMLinkage.LLVMInternalLinkage)
+        })
+    }
+}
+
+internal fun ContextUtils.addKotlinGlobal(name: String, type: LLVMTypeRef, isExported: Boolean): AddressAccess {
+    return GlobalAddressAccess(LLVMAddGlobal(context.llvmModule, type, name)!!.also {
+        if (!isExported)
+            LLVMSetLinkage(it, LLVMLinkage.LLVMInternalLinkage)
+    })
 }
 
 internal fun functionType(returnType: LLVMTypeRef, isVarArg: Boolean = false, vararg paramTypes: LLVMTypeRef) =
@@ -381,7 +415,26 @@ internal fun node(vararg it:LLVMValueRef) = LLVMMDNodeInContext(llvmContext, it.
 
 internal fun LLVMValueRef.setUnaligned() = apply { LLVMSetAlignment(this, 1) }
 
+internal fun getOperands(value: LLVMValueRef) =
+        (0 until LLVMGetNumOperands(value)).map { LLVMGetOperand(value, it)!! }
+
+internal fun getGlobalAliases(module: LLVMModuleRef) =
+        generateSequence(LLVMGetFirstGlobalAlias(module), { LLVMGetNextGlobalAlias(it) })
+
+internal fun getFunctions(module: LLVMModuleRef) =
+        generateSequence(LLVMGetFirstFunction(module), { LLVMGetNextFunction(it) })
+
+internal fun getGlobals(module: LLVMModuleRef) =
+        generateSequence(LLVMGetFirstGlobal(module), { LLVMGetNextGlobal(it) })
+
 fun LLVMTypeRef.isFloatingPoint(): Boolean = when (llvm.LLVMGetTypeKind(this)) {
     LLVMTypeKind.LLVMFloatTypeKind, LLVMTypeKind.LLVMDoubleTypeKind -> true
+    else -> false
+}
+
+fun LLVMTypeRef.isVectorElementType(): Boolean = when (llvm.LLVMGetTypeKind(this)) {
+    LLVMTypeKind.LLVMIntegerTypeKind,
+    LLVMTypeKind.LLVMFloatTypeKind,
+    LLVMTypeKind.LLVMDoubleTypeKind -> true
     else -> false
 }

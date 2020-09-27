@@ -46,6 +46,14 @@ public actual inline fun <R, T> (suspend R.() -> T).startCoroutineUninterceptedO
         completion: Continuation<T>
 ): Any? = (this as Function2<R, Continuation<T>, Any?>).invoke(receiver, completion)
 
+@Suppress("UNCHECKED_CAST")
+@kotlin.internal.InlineOnly
+internal actual inline fun <R, P, T> (suspend R.(P) -> T).startCoroutineUninterceptedOrReturn(
+        receiver: R,
+        param: P,
+        completion: Continuation<T>
+): Any? = (this as Function3<R, P, Continuation<T>, Any?>).invoke(receiver, param, completion)
+
 private object CoroutineSuspendedMarker
 
 
@@ -193,4 +201,35 @@ private inline fun <T> createCoroutineFromSuspendFunction(
                         else -> error("This coroutine had already completed")
                     }
         }
+}
+
+/**
+ * This function creates continuation suitable for passing as implicit argument to suspend functions.
+ * The continuation calls [callback] and then delegates to [completion].
+ *
+ * The result is [ContinuationImpl] because that is an expectation of all coroutines machinery.
+ *
+ * It can be thought as a state machine of
+ * ```
+ * suspend fun foo() {
+ *     val result = runCatching { <suspended here> }
+ *     callback(result)
+ * }
+ * ```
+ */
+@Suppress("UNCHECKED_CAST")
+internal inline fun createContinuationArgumentFromCallback(
+        completion: Continuation<Unit>,
+        crossinline callback: (Result<Any?>) -> Unit
+): Continuation<Any?> = object : ContinuationImpl(completion as Continuation<Any?>) {
+    private var invoked = false
+
+    override fun invokeSuspend(result: Result<Any?>): Any? {
+        if (invoked) error("This coroutine had already completed")
+        invoked = true
+
+        callback(result)
+
+        return Unit // Not suspended.
+    }
 }

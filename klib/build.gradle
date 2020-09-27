@@ -8,9 +8,12 @@ buildscript {
         classpath "org.jetbrains.kotlin:kotlin-native-gradle-plugin:$gradlePluginVersion"
     }
 
-    ext.useCustomDist = project.hasProperty("org.jetbrains.kotlin.native.home")
+    ext.useCustomDist = project.hasProperty("org.jetbrains.kotlin.native.home") || project.hasProperty("konan.home")
     if (!useCustomDist) {
         ext.setProperty("org.jetbrains.kotlin.native.home", distDir.absolutePath)
+    }
+    if (project.hasProperty("konan.home")) {
+        ext.setProperty("org.jetbrains.kotlin.native.home", project.getProperty("konan.home"))
     }
 }
 
@@ -41,15 +44,17 @@ repositories {
 }
 
 dependencies {
-    compile "org.jetbrains.kotlin:kotlin-stdlib:$buildKotlinVersion"
-    compile project(path: ':backend.native', configuration: 'cli_bc')
-    testCompile "junit:junit:4.12"
-    testCompile "org.jetbrains.kotlin:kotlin-test-junit:$buildKotlinVersion"
-    testCompile "org.jetbrains.kotlin:kotlin-test:$buildKotlinVersion"
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlinVersion"
+    implementation project(path: ':backend.native', configuration: 'cli_bc')
+    implementation project(":utilities:basic-utils")
+    testImplementation "junit:junit:4.12"
+    testImplementation "org.jetbrains.kotlin:kotlin-test-junit:$buildKotlinVersion"
+    testImplementation "org.jetbrains.kotlin:kotlin-test:$buildKotlinVersion"
 }
 
 test {
     dependsOn 'cleanTest'
+    // Specify a path to the distribution that is used in the tests.
     systemProperty('konan.home', getProperty("org.jetbrains.kotlin.native.home"))
     dependsOn konanArtifacts.collect { it.getByTarget('host') }
     if (useCustomDist) {

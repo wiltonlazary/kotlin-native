@@ -30,7 +30,7 @@ struct RuntimeState {
   volatile int executionStatus;
 };
 
-typedef void (*Initializer)(int initialize);
+typedef void (*Initializer)(int initialize, MemoryState* memory);
 struct InitNode {
   Initializer init;
   InitNode* next;
@@ -66,13 +66,15 @@ bool updateStatusIf(RuntimeState* state, int oldStatus, int newStatus) {
 #endif
 }
 
-void InitOrDeinitGlobalVariables(int initialize) {
-  InitNode *currNode = initHeadNode;
-  while (currNode != nullptr) {
-    currNode->init(initialize);
-    currNode = currNode->next;
+void InitOrDeinitGlobalVariables(int initialize, MemoryState* memory) {
+  InitNode* currentNode = initHeadNode;
+  while (currentNode != nullptr) {
+    currentNode->init(initialize, memory);
+    currentNode = currentNode->next;
   }
 }
+
+KBoolean g_checkLeaks = KonanNeedDebugInfo;
 
 constexpr RuntimeState* kInvalidRuntime = nullptr;
 
@@ -83,7 +85,7 @@ inline bool isValidRuntime() {
   return ::runtimeState != kInvalidRuntime;
 }
 
-int aliveRuntimesCount = 0;
+volatile int aliveRuntimesCount = 0;
 
 RuntimeState* initRuntime() {
   SetKonanTerminateHandler();
@@ -98,26 +100,26 @@ RuntimeState* initRuntime() {
   if (firstRuntime) {
     isMainThread = 1;
     konan::consoleInit();
-
 #if KONAN_OBJC_INTEROP
     Kotlin_ObjCExport_initialize();
 #endif
-
-    InitOrDeinitGlobalVariables(INIT_GLOBALS);
+    InitOrDeinitGlobalVariables(INIT_GLOBALS, result->memoryState);
   }
-  InitOrDeinitGlobalVariables(INIT_THREAD_LOCAL_GLOBALS);
+  InitOrDeinitGlobalVariables(INIT_THREAD_LOCAL_GLOBALS, result->memoryState);
   return result;
 }
 
 void deinitRuntime(RuntimeState* state) {
   ResumeMemory(state->memoryState);
   bool lastRuntime = atomicAdd(&aliveRuntimesCount, -1) == 0;
-  InitOrDeinitGlobalVariables(DEINIT_THREAD_LOCAL_GLOBALS);
+  InitOrDeinitGlobalVariables(DEINIT_THREAD_LOCAL_GLOBALS, state->memoryState);
   if (lastRuntime)
-    InitOrDeinitGlobalVariables(DEINIT_GLOBALS);
+    InitOrDeinitGlobalVariables(DEINIT_GLOBALS, state->memoryState);
+  auto workerId = GetWorkerId(state->worker);
   WorkerDeinit(state->worker);
   DeinitMemory(state->memoryState);
   konanDestructInstance(state);
+  WorkerDestroyThreadDataIfNeeded(workerId);
 }
 
 void Kotlin_deinitRuntimeCallback(void* argument) {
@@ -183,7 +185,7 @@ void Kotlin_resumeRuntime(RuntimeState* state) {
     WorkerResume(state->worker);
 }
 
-RuntimeState* RUNTIME_USED Kotlin_getRuntime() {
+RuntimeState* Kotlin_getRuntime() {
   RuntimeCheck(isValidRuntime(), "Runtime must be active on the current thread");
   return ::runtimeState;
 }
@@ -266,7 +268,20 @@ KBoolean Konan_Platform_isDebugBinary() {
 }
 
 void Kotlin_zeroOutTLSGlobals() {
-  InitOrDeinitGlobalVariables(DEINIT_THREAD_LOCAL_GLOBALS);
+  if (runtimeState != nullptr && runtimeState->memoryState != nullptr)
+    InitOrDeinitGlobalVariables(DEINIT_THREAD_LOCAL_GLOBALS, runtimeState->memoryState);
+}
+
+bool Kotlin_memoryLeakCheckerEnabled() {
+  return g_checkLeaks;
+}
+
+KBoolean Konan_Platform_getMemoryLeakChecker() {
+  return g_checkLeaks;
+}
+
+void Konan_Platform_setMemoryLeakChecker(KBoolean value) {
+  g_checkLeaks = value;
 }
 
 }  // extern "C"

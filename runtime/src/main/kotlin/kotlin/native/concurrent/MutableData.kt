@@ -14,6 +14,9 @@ external private fun Any.share()
 @SymbolName("Kotlin_CPointer_CopyMemory")
 external private fun CopyMemory(to: COpaquePointer?, from: COpaquePointer?, count: Int)
 
+@SymbolName("ReadHeapRefNoLock")
+internal external fun readHeapRefNoLock(where: Any, index: Int): Any?
+
 /**
  * Mutable concurrently accessible data buffer. Could be accessed from several workers simulteniously.
  */
@@ -75,7 +78,7 @@ public class MutableData constructor(capacity: Int = 16) {
     public fun append(data: ByteArray, fromIndex: Int = 0, toIndex: Int = data.size): Unit = locked(lock) {
         if (fromIndex > toIndex)
             throw IndexOutOfBoundsException("$fromIndex is bigger than $toIndex")
-        if (toIndex == toIndex) return
+        if (fromIndex == toIndex) return
         val where = resizeDataLocked(this.size + (toIndex - fromIndex))
         data.copyInto(buffer, where, fromIndex, toIndex)
     }

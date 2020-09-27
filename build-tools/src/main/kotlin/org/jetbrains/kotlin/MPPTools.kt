@@ -15,6 +15,7 @@ import org.gradle.api.execution.TaskExecutionListener
 import org.jetbrains.kotlin.gradle.plugin.KotlinTargetPreset
 import org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType
 import org.jetbrains.kotlin.gradle.tasks.KotlinNativeLink
+import org.jetbrains.kotlin.konan.target.HostManager
 import org.jetbrains.report.*
 import org.jetbrains.report.json.*
 import java.nio.file.Paths
@@ -103,7 +104,7 @@ fun createJsonReport(projectProperties: Map<String, Any>): String {
     val kotlin = Compiler(backend, getValue("kotlinVersion"))
     val benchDesc = getValue("benchmarks")
     val benchmarksArray = JsonTreeParser.parse(benchDesc)
-    val benchmarks = BenchmarksReport.parseBenchmarksArray(benchmarksArray)
+    val benchmarks = parseBenchmarksArray(benchmarksArray)
             .union(projectProperties["compileTime"] as List<BenchmarkResult>).union(
                     listOf(projectProperties["codeSize"] as? BenchmarkResult).filterNotNull()).toList()
     val report = BenchmarksReport(env, benchmarks, kotlin)
@@ -128,26 +129,33 @@ fun mergeReports(reports: List<File>): String {
     }
 }
 
-fun getCompileOnlyBenchmarksOpts(project: Project, defaultCompilerOpts: List<String>) =
-        (project.findProperty("nativeBuildType") as String?)?.let {
-            if (it.equals("RELEASE", true))
-                listOf("-opt")
-            else if (it.equals("DEBUG", true))
-                listOf("-g")
-            else listOf()
-        } ?: defaultCompilerOpts
+fun getCompileOnlyBenchmarksOpts(project: Project, defaultCompilerOpts: List<String>): List<String> {
+    val dist = project.file(project.findProperty("kotlin.native.home") ?: "dist")
+    val useCache = !project.hasProperty("disableCompilerCaches")
+    val cacheOption = "-Xcache-directory=$dist/klib/cache/${HostManager.host.name}-gSTATIC"
+            .takeIf { useCache && PlatformInfo.isMac() } // TODO: remove target condition when we have cache support for other targets.
+    return (project.findProperty("nativeBuildType") as String?)?.let {
+        if (it.equals("RELEASE", true))
+            listOf("-opt")
+        else if (it.equals("DEBUG", true))
+            listOfNotNull("-g", cacheOption)
+        else listOf()
+    } ?: defaultCompilerOpts + listOfNotNull(cacheOption?.takeIf { !defaultCompilerOpts.contains("-opt") })
+}
 
 // Find file with set name in directory.
 fun findFile(fileName: String, directory: String): String? =
-    File(directory).walkBottomUp().find { it.name == fileName }?.getAbsolutePath()
+        File(directory).walkTopDown().filter { !it.absolutePath.contains(".dSYM") }
+                .find { it.name == fileName }?.getAbsolutePath()
 
-fun uploadFileToBintray(url: String, project: String, version: String, packageName: String, bintrayFilePath: String,
-                        filePath: String, username: String? = null, password: String? = null) {
-    val uploadUrl = "$url/$project/$packageName/$version/$bintrayFilePath?publish=1"
-    sendUploadRequest(uploadUrl, filePath, username, password)
+fun uploadFileToArtifactory(url: String, project: String, artifactoryFilePath: String,
+                        filePath: String, password: String) {
+    val uploadUrl = "$url/$project/$artifactoryFilePath"
+    sendUploadRequest(uploadUrl, filePath, extraHeaders = listOf(Pair("X-JFrog-Art-Api", password)))
 }
 
-fun sendUploadRequest(url: String, fileName: String, username: String? = null, password: String? = null) {
+fun sendUploadRequest(url: String, fileName: String, username: String? = null, password: String? = null,
+                      extraHeaders: List<Pair<String, String>> = emptyList()) {
     val uploadingFile = File(fileName)
     val connection = URL(url).openConnection() as HttpURLConnection
     connection.doOutput = true
@@ -158,7 +166,9 @@ fun sendUploadRequest(url: String, fileName: String, username: String? = null, p
         val auth = Base64.getEncoder().encode((username + ":" + password).toByteArray()).toString(Charsets.UTF_8)
         connection.addRequestProperty("Authorization", "Basic $auth")
     }
-
+    extraHeaders.forEach {
+        connection.addRequestProperty(it.first, it.second)
+    }
     try {
         connection.connect()
         BufferedOutputStream(connection.outputStream).use { output ->
@@ -185,20 +195,23 @@ fun createRunTask(
     return subproject.tasks.create(name, RunKotlinNativeTask::class.java, linkTask, executable, outputFileName)
 }
 
-fun getJvmCompileTime(programName: String): BenchmarkResult =
-        TaskTimerListener.getBenchmarkResult(programName, listOf("compileKotlinMetadata", "jvmJar"))
+fun getJvmCompileTime(subproject: Project,programName: String): BenchmarkResult =
+        TaskTimerListener.getTimerListenerOfSubproject(subproject)
+                .getBenchmarkResult(programName, listOf("compileKotlinMetadata", "jvmJar"))
 
 @JvmOverloads
-fun getNativeCompileTime(programName: String,
+fun getNativeCompileTime(subproject: Project, programName: String,
                          tasks: List<String> = listOf("linkBenchmarkReleaseExecutableNative")): BenchmarkResult =
-        TaskTimerListener.getBenchmarkResult(programName, tasks)
+        TaskTimerListener.getTimerListenerOfSubproject(subproject).getBenchmarkResult(programName, tasks)
 
-fun getCompileBenchmarkTime(programName: String, tasksNames: Iterable<String>, repeats: Int, exitCodes: Map<String, Int>) =
+fun getCompileBenchmarkTime(subproject: Project,
+                            programName: String, tasksNames: Iterable<String>,
+                            repeats: Int, exitCodes: Map<String, Int>) =
     (1..repeats).map { number ->
         var time = 0.0
         var status = BenchmarkResult.Status.PASSED
         tasksNames.forEach {
-            time += TaskTimerListener.getTime("$it$number")
+            time += TaskTimerListener.getTimerListenerOfSubproject(subproject).getTime("$it$number")
             status = if (exitCodes["$it$number"] != 0) BenchmarkResult.Status.FAILED else status
         }
 
@@ -218,19 +231,24 @@ fun toCompileBenchmark(metricDescription: String, status: String, programName: S
 // Class time tracker for all tasks.
 class TaskTimerListener: TaskExecutionListener {
     companion object {
-        val tasksTimes = mutableMapOf<String, Double>()
+        internal val timerListeners = mutableMapOf<String, TaskTimerListener>()
 
-        fun getBenchmarkResult(programName: String, tasksNames: List<String>): BenchmarkResult {
-            val time = tasksNames.map { tasksTimes[it] ?: 0.0 }.sum()
-            // TODO get this info from gradle plugin with exit code end stacktrace.
-            val status = tasksNames.map { tasksTimes.containsKey(it) }.reduce { a, b -> a && b }
-            return BenchmarkResult(programName,
-                                    if (status) BenchmarkResult.Status.PASSED else BenchmarkResult.Status.FAILED,
-                                    time, BenchmarkResult.Metric.COMPILE_TIME, time, 1, 0)
-        }
-
-        fun getTime(taskName: String) = tasksTimes[taskName] ?: 0.0
+        internal fun getTimerListenerOfSubproject(subproject: Project) =
+                timerListeners[subproject.name] ?: error("TimeListener for project ${subproject.name} wasn't set")
     }
+
+    val tasksTimes = mutableMapOf<String, Double>()
+
+    fun getBenchmarkResult(programName: String, tasksNames: List<String>): BenchmarkResult {
+        val time = tasksNames.map { tasksTimes[it] ?: 0.0 }.sum()
+        // TODO get this info from gradle plugin with exit code end stacktrace.
+        val status = tasksNames.map { tasksTimes.containsKey(it) }.reduce { a, b -> a && b }
+        return BenchmarkResult(programName,
+                if (status) BenchmarkResult.Status.PASSED else BenchmarkResult.Status.FAILED,
+                time, BenchmarkResult.Metric.COMPILE_TIME, time, 1, 0)
+    }
+
+    fun getTime(taskName: String) = tasksTimes[taskName] ?: 0.0
 
     private var startTime = System.nanoTime()
 
@@ -244,5 +262,7 @@ class TaskTimerListener: TaskExecutionListener {
 }
 
 fun addTimeListener(subproject: Project) {
-    subproject.gradle.addListener(TaskTimerListener())
+    val listener = TaskTimerListener()
+    TaskTimerListener.timerListeners.put(subproject.name, listener)
+    subproject.gradle.addListener(listener)
 }

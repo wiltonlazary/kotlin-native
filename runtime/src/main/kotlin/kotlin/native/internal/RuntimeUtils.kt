@@ -14,6 +14,11 @@ fun ThrowNullPointerException(): Nothing {
 }
 
 @ExportForCppRuntime
+internal fun ThrowIndexOutOfBoundsException(): Nothing {
+    throw IndexOutOfBoundsException()
+}
+
+@ExportForCppRuntime
 internal fun ThrowArrayIndexOutOfBoundsException(): Nothing {
     throw ArrayIndexOutOfBoundsException()
 }
@@ -24,8 +29,14 @@ fun ThrowClassCastException(instance: Any, typeInfo: NativePtr): Nothing {
     throw ClassCastException("${instance::class.qualifiedName} cannot be cast to ${clazz.qualifiedName}")
 }
 
+@ExportForCppRuntime
 fun ThrowTypeCastException(): Nothing {
     throw TypeCastException()
+}
+
+@ExportForCppRuntime
+fun ThrowKotlinNothingValueException(): Nothing {
+    throw KotlinNothingValueException()
 }
 
 @ExportForCppRuntime
@@ -59,6 +70,11 @@ fun ThrowUninitializedPropertyAccessException(propertyName: String): Nothing {
 @ExportForCppRuntime
 internal fun ThrowIllegalArgumentException() : Nothing {
     throw IllegalArgumentException()
+}
+
+@ExportForCppRuntime
+internal fun ThrowIllegalArgumentExceptionWithMessage(message: String) : Nothing {
+    throw IllegalArgumentException(message)
 }
 
 @ExportForCppRuntime
@@ -98,6 +114,9 @@ internal fun ReportUnhandledException(throwable: Throwable) {
     print("Uncaught Kotlin exception: ")
     throwable.printStackTrace()
 }
+
+@SymbolName("TerminateWithUnhandledException")
+internal external fun TerminateWithUnhandledException(throwable: Throwable)
 
 @ExportForCppRuntime
 internal fun ExceptionReporterLaunchpad(reporter: (Throwable) -> Unit, throwable: Throwable) {
@@ -164,17 +183,21 @@ internal fun getProgressionLast(start: Long, end: Long, step: Long): Long =
 // Called by the debugger.
 @ExportForCppRuntime
 internal fun KonanObjectToUtf8Array(value: Any?): ByteArray {
-    val string = when (value) {
-        is Array<*> -> value.contentToString()
-        is CharArray -> value.contentToString()
-        is BooleanArray -> value.contentToString()
-        is ByteArray -> value.contentToString()
-        is ShortArray -> value.contentToString()
-        is IntArray -> value.contentToString()
-        is LongArray -> value.contentToString()
-        is FloatArray -> value.contentToString()
-        is DoubleArray -> value.contentToString()
-        else -> value.toString()
+    val string = try {
+        when (value) {
+            is Array<*> -> value.contentToString()
+            is CharArray -> value.contentToString()
+            is BooleanArray -> value.contentToString()
+            is ByteArray -> value.contentToString()
+            is ShortArray -> value.contentToString()
+            is IntArray -> value.contentToString()
+            is LongArray -> value.contentToString()
+            is FloatArray -> value.contentToString()
+            is DoubleArray -> value.contentToString()
+            else -> value.toString()
+        }
+    } catch (error: Throwable) {
+        "<Thrown $error when converting to string>"
     }
     return string.encodeToByteArray()
 }

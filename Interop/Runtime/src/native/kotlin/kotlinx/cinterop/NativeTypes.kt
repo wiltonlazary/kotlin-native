@@ -56,6 +56,16 @@ external fun CPointer<*>.getRawValue(): NativePtr
 
 internal fun CPointer<*>.cPointerToString() = "CPointer(raw=$rawValue)"
 
+public class Vector128VarOf<T : Vector128>(rawPtr: NativePtr) : CVariable(rawPtr) {
+    companion object : Type(size = 16, align = 16)
+}
+
+public typealias Vector128Var = Vector128VarOf<Vector128>
+
+public var <T : Vector128> Vector128VarOf<T>.value: T
+    get() = nativeMemUtils.getVector(this) as T
+    set(value) = nativeMemUtils.putVector(this, value)
+
 /**
  * Returns a pointer to C function which calls given Kotlin *static* function.
  *

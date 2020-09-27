@@ -26,20 +26,6 @@ interface ClangFlags : TargetableExternalStorage {
     val clangDynamicFlags get() = targetList("clangDynamicFlags")
 }
 
-interface LlcFlags : TargetableExternalStorage {
-    val llcFlags get()      = targetList("llcFlags")
-    val llcNooptFlags get() = targetList("llcNooptFlags")
-    val llcOptFlags get()   = targetList("llcOptFlags")
-    val llcDebugFlags get() = targetList("llcDebugFlags")
-}
-
-interface OptFlags : TargetableExternalStorage {
-    val optFlags get()      = targetList("optFlags")
-    val optNooptFlags get() = targetList("optNooptFlags")
-    val optOptFlags get()   = targetList("optOptFlags")
-    val optDebugFlags get() = targetList("optDebugFlags")
-}
-
 interface LldFlags : TargetableExternalStorage {
     val lldFlags get()      = targetList("lld")
 }
@@ -53,13 +39,10 @@ interface Configurables : TargetableExternalStorage {
     val libffiDir get() = hostString("libffiDir")
 
     // TODO: Delegate to a map?
-    val entrySelector get() = targetList("entrySelector")
     val linkerOptimizationFlags get() = targetList("linkerOptimizationFlags")
     val linkerKonanFlags get() = targetList("linkerKonanFlags")
     val linkerNoDebugFlags get() = targetList("linkerNoDebugFlags")
     val linkerDynamicFlags get() = targetList("linkerDynamicFlags")
-    val llvmDebugOptFlags get() = targetList("llvmDebugOptFlags")
-    val llvmDebugLlcFlags get() = targetList("llvmDebugLlcFlags")
     val targetSysRoot get() = targetString("targetSysRoot")
 
     // Notice: these ones are host-target.
@@ -84,25 +67,21 @@ interface AppleConfigurables : Configurables, ClangFlags {
 
 interface MingwConfigurables : TargetableConfigurables, ClangFlags
 
-interface LinuxBasedConfigurables : TargetableConfigurables, ClangFlags {
+interface GccConfigurables : TargetableConfigurables, ClangFlags {
     val gccToolchain get() = hostString("gccToolchain")
     val absoluteGccToolchain get() = absolute(gccToolchain)
 
     val libGcc get() = targetString("libGcc")!!
     val dynamicLinker get() = targetString("dynamicLinker")!!
-    val pluginOptimizationFlags get() = targetList("pluginOptimizationFlags")
     val abiSpecificLibraries get() = targetList("abiSpecificLibraries")
 }
 
-interface LinuxConfigurables : LinuxBasedConfigurables
-interface LinuxMIPSConfigurables : LinuxBasedConfigurables
-interface RaspberryPiConfigurables : LinuxBasedConfigurables
 interface AndroidConfigurables : TargetableConfigurables, ClangFlags
 
-interface WasmConfigurables : TargetableConfigurables, OptFlags, LlcFlags, LldFlags
+interface WasmConfigurables : TargetableConfigurables, ClangFlags, LldFlags
 
-// Codegen for Zephyr calls opt and llc with predefined set of flags
-// so there is no need for OptFlags or LlcFlags.
-interface ZephyrConfigurables : TargetableConfigurables {
+interface ZephyrConfigurables : TargetableConfigurables, ClangFlags {
     val boardSpecificClangFlags get() = targetList("boardSpecificClangFlags")
+    val targetCpu get() = targetString("targetCpu")
+    val targetAbi get() = targetString("targetAbi")
 }

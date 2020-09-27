@@ -55,10 +55,46 @@ val StubContainer.defaultMemberModality: MemberStubModality
     get() = when (this) {
         is SimpleStubContainer -> MemberStubModality.FINAL
         is ClassStub.Simple -> if (this.modality == ClassStubModality.INTERFACE) {
-            MemberStubModality.OPEN
+            MemberStubModality.ABSTRACT
         } else {
             MemberStubModality.FINAL
         }
         is ClassStub.Companion -> MemberStubModality.FINAL
         is ClassStub.Enum -> MemberStubModality.FINAL
+    }
+
+/**
+ * Returns constructor that should be rendered in class header.
+ */
+val ClassStub.explicitPrimaryConstructor: ConstructorStub?
+    get() = functions.filterIsInstance<ConstructorStub>().firstOrNull(ConstructorStub::isPrimary)
+
+fun ClassStub.nestedName(): String =
+        classifier.getRelativeFqName().substringAfterLast('.')
+
+fun ConstantStub.determineConstantAnnotationClassifier(): Classifier = when (this) {
+    is StringConstantStub -> "String"
+    is IntegralConstantStub -> when (size) {
+        1 -> if (isSigned) "Byte" else "UByte"
+        2 -> if (isSigned) "Short" else "UShort"
+        4 -> if (isSigned) "Int" else "UInt"
+        8 -> if (isSigned) "Long" else "ULong"
+        else -> error("Integral constant with unexpected size of $size.")
+    }
+    is DoubleConstantStub -> when (size) {
+        4 -> "Float"
+        8 -> "Double"
+        else -> error("Real constant with unexpected size of $size.")
+    }
+}.let { Classifier.topLevel(cinteropInternalPackage, "ConstantValue").nested(it) }
+
+/**
+ * Returns the original name of the given type.
+ */
+val StubType.underlyingTypeFqName: String
+    get() = when (this) {
+        is ClassifierStubType -> classifier.fqName
+        is AbbreviatedType -> underlyingType.underlyingTypeFqName
+        is FunctionalType -> classifier.fqName
+        is TypeParameterType -> name
     }

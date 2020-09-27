@@ -20,11 +20,12 @@ import org.jetbrains.kotlin.ir.util.isTypeParameter
 import org.jetbrains.kotlin.ir.util.isUnsigned
 import org.jetbrains.kotlin.ir.util.render
 import org.jetbrains.kotlin.konan.CURRENT
-import org.jetbrains.kotlin.konan.KonanVersion
+import org.jetbrains.kotlin.konan.CompilerVersion
 import org.jetbrains.kotlin.konan.file.File
+import org.jetbrains.kotlin.utils.addToStdlib.cast
 
 internal object DWARF {
-    val producer                       = "konanc ${KonanVersion.CURRENT} / kotlin-compiler: ${KotlinVersion.CURRENT}"
+    val producer                       = "konanc ${CompilerVersion.CURRENT} / kotlin-compiler: ${KotlinVersion.CURRENT}"
     /* TODO: from LLVM sources is unclear what runtimeVersion corresponds to term in terms of dwarf specification. */
     val dwarfVersionMetaDataNodeName  get() = "Dwarf Version".mdString()
     val dwarfDebugInfoMetaDataNodeName get() = "Debug Info Version".mdString()
@@ -66,13 +67,14 @@ internal class DebugInfo internal constructor(override val context: Context):Con
     val inlinedSubprograms = mutableMapOf<IrFunction, DISubprogramRef>()
     var builder: DIBuilderRef? = null
     var module: DIModuleRef? = null
+    var compilationUnit: DIScopeOpaqueRef? = null
     var objHeaderPointerType: DITypeOpaqueRef? = null
     var types = mutableMapOf<IrType, DITypeOpaqueRef>()
 
     val llvmTypes = mapOf<IrType, LLVMTypeRef>(
             context.irBuiltIns.booleanType to context.llvm.llvmInt8,
             context.irBuiltIns.byteType    to context.llvm.llvmInt8,
-            context.irBuiltIns.charType    to context.llvm.llvmInt8,
+            context.irBuiltIns.charType    to context.llvm.llvmInt16,
             context.irBuiltIns.shortType   to context.llvm.llvmInt16,
             context.irBuiltIns.intType     to context.llvm.llvmInt32,
             context.irBuiltIns.longType    to context.llvm.llvmInt64,
@@ -115,16 +117,24 @@ internal data class FileAndFolder(val file: String, val folder: String) {
     fun path() = if (this == NOFILE) file else "$folder/$file"
 }
 
-internal fun String?.toFileAndFolder():FileAndFolder {
+internal fun String?.toFileAndFolder(context: Context):FileAndFolder {
     this ?: return FileAndFolder.NOFILE
     val file = File(this).absoluteFile
-    return FileAndFolder(file.name, file.parent)
+    var parent = file.parent
+    context.configuration.get(KonanConfigKeys.DEBUG_PREFIX_MAP)?.let { debugPrefixMap ->
+      for ((key, value) in debugPrefixMap) {
+        if (parent.startsWith(key)) {
+          parent = value + parent.removePrefix(key)
+        }
+      }
+    }
+    return FileAndFolder(file.name, parent)
 }
 
 internal fun generateDebugInfoHeader(context: Context) {
     if (context.shouldContainAnyDebugInfo()) {
         val path = context.config.outputFile
-            .toFileAndFolder()
+            .toFileAndFolder(context)
         @Suppress("UNCHECKED_CAST")
         context.debugInfo.module   = DICreateModule(
                 builder            = context.debugInfo.builder,
@@ -172,7 +182,7 @@ internal fun generateDebugInfoHeader(context: Context) {
                 derivedFrom   = null,
                 elements      = null,
                 elementsCount = 0,
-                refPlace      = null)!! as DITypeOpaqueRef
+                refPlace      = null).cast<DITypeOpaqueRef>()
         context.debugInfo.objHeaderPointerType = dwarfPointerType(context, objHeaderType)
     }
 }
@@ -180,7 +190,7 @@ internal fun generateDebugInfoHeader(context: Context) {
 @Suppress("UNCHECKED_CAST")
 internal fun IrType.dwarfType(context: Context, targetData: LLVMTargetDataRef): DITypeOpaqueRef {
     when {
-        this.computePrimitiveBinaryTypeOrNull() != null -> return debugInfoBaseType(context, targetData, this.render(), llvmType(context), encoding(context).value.toInt())
+        this.computePrimitiveBinaryTypeOrNull() != null -> return debugInfoBaseType(context, targetData, this.render(), llvmType(context), encoding().value.toInt())
         else -> {
             return when {
                 classOrNull != null || this.isTypeParameter() -> context.debugInfo.objHeaderPointerType!!
@@ -219,11 +229,12 @@ internal fun IrType.llvmType(context:Context): LLVMTypeRef = context.debugInfo.l
         PrimitiveBinaryType.LONG -> context.llvm.llvmInt64
         PrimitiveBinaryType.FLOAT -> context.llvm.llvmFloat
         PrimitiveBinaryType.DOUBLE -> context.llvm.llvmDouble
+        PrimitiveBinaryType.VECTOR128 -> context.llvm.llvmVector128
         else -> context.debugInfo.otherLlvmType
     }
 }
 
-internal fun IrType.encoding(context: Context): DwarfTypeKind = when(computePrimitiveBinaryTypeOrNull()) {
+internal fun IrType.encoding(): DwarfTypeKind = when(computePrimitiveBinaryTypeOrNull()) {
     PrimitiveBinaryType.FLOAT -> DwarfTypeKind.DW_ATE_float
     PrimitiveBinaryType.DOUBLE -> DwarfTypeKind.DW_ATE_float
     PrimitiveBinaryType.BOOLEAN -> DwarfTypeKind.DW_ATE_boolean

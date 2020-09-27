@@ -27,10 +27,12 @@ namespace konan {
 // Console operations.
 void consoleInit();
 void consolePrintf(const char* format, ...);
+void consoleErrorf(const char* format, ...);
 void consoleWriteUtf8(const void* utf8, uint32_t sizeBytes);
 void consoleErrorUtf8(const void* utf8, uint32_t sizeBytes);
 // Negative return value denotes that read wasn't successful.
 int32_t consoleReadUtf8(void* utf8, uint32_t maxSizeBytes);
+void consoleFlush();
 
 // Process control.
 RUNTIME_NORETURN void abort(void);
@@ -75,6 +77,7 @@ void *memset(void *b, int c, size_t len);
 
 // Memory operations.
 void* calloc(size_t count, size_t size);
+void* calloc_aligned(size_t count, size_t size, size_t alignment);
 void free(void* ptr);
 
 // Time operations.

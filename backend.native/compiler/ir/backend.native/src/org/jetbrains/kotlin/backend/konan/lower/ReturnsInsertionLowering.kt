@@ -14,8 +14,8 @@ import org.jetbrains.kotlin.ir.builders.irReturn
 import org.jetbrains.kotlin.ir.declarations.IrConstructor
 import org.jetbrains.kotlin.ir.declarations.IrFile
 import org.jetbrains.kotlin.ir.declarations.IrFunction
-import org.jetbrains.kotlin.ir.expressions.IrBlockBody
-import org.jetbrains.kotlin.ir.types.classifierOrNull
+import org.jetbrains.kotlin.ir.expressions.*
+import org.jetbrains.kotlin.ir.expressions.impl.IrBlockBodyImpl
 import org.jetbrains.kotlin.ir.visitors.IrElementVisitorVoid
 import org.jetbrains.kotlin.ir.visitors.acceptChildrenVoid
 import org.jetbrains.kotlin.ir.visitors.acceptVoid
@@ -32,11 +32,28 @@ internal class ReturnsInsertionLowering(val context: Context) : FileLoweringPass
             override fun visitFunction(declaration: IrFunction) {
                 declaration.acceptChildrenVoid(this)
 
-                val body = declaration.body
-                if ((declaration is IrConstructor || declaration.returnType.classifierOrNull == symbols.unit) && body != null) {
-                    val irBuilder = context.createIrBuilder(declaration.symbol, declaration.endOffset, declaration.endOffset)
+                context.createIrBuilder(declaration.symbol, declaration.endOffset, declaration.endOffset).run {
+                    when (val body = declaration.body) {
+                        is IrExpressionBody -> {
+                            declaration.body = IrBlockBodyImpl(body.startOffset, body.endOffset) {
+                                statements += irReturn(body.expression)
+                            }
+                        }
+                        is IrBlockBody -> {
+                            if (declaration is IrConstructor || declaration.returnType == context.irBuiltIns.unitType)
+                                body.statements += irReturn(irGetObject(symbols.unit))
+                        }
+                    }
+                }
+            }
+
+            override fun visitBlock(expression: IrBlock) {
+                expression.acceptChildrenVoid(this)
+                if (expression !is IrReturnableBlock) return
+                if (expression.inlineFunctionSymbol?.owner?.returnType == context.irBuiltIns.unitType) {
+                    val irBuilder = context.createIrBuilder(expression.symbol, expression.endOffset, expression.endOffset)
                     irBuilder.run {
-                         (body as IrBlockBody).statements += irReturn(irGetObject(symbols.unit))
+                        expression.statements += irReturn(irGetObject(symbols.unit))
                     }
                 }
             }

@@ -5,6 +5,7 @@
 
 package org.jetbrains.kotlin.backend.konan
 
+import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
 import org.jetbrains.kotlin.config.CompilerConfiguration
 import org.jetbrains.kotlin.konan.file.File
 import org.jetbrains.kotlin.konan.target.CompilerOutputKind
@@ -13,7 +14,7 @@ import org.jetbrains.kotlin.library.KotlinLibrary
 import org.jetbrains.kotlin.library.resolver.KotlinLibraryResolveResult
 
 class CacheSupport(
-        configuration: CompilerConfiguration,
+        val configuration: CompilerConfiguration,
         resolvedLibraries: KotlinLibraryResolveResult,
         target: KonanTarget,
         produce: CompilerOutputKind
@@ -22,6 +23,22 @@ class CacheSupport(
 
     // TODO: consider using [FeaturedLibraries.kt].
     private val fileToLibrary = allLibraries.associateBy { it.libraryFile }
+
+    private val implicitCacheDirectories = configuration.get(KonanConfigKeys.CACHE_DIRECTORIES)!!
+            .map {
+                File(it).takeIf { it.isDirectory }
+                        ?: configuration.reportCompilationError("cache directory $it is not found or not a directory")
+            }
+
+    internal fun tryGetImplicitOutput(): String? {
+        val libraryToAddToCache = configuration.get(KonanConfigKeys.LIBRARY_TO_ADD_TO_CACHE) ?: return null
+        // Put the resulting library in the first cache directory.
+        val cacheDirectory = implicitCacheDirectories.firstOrNull() ?: return null
+        val libraryToAddToCacheFile = File(libraryToAddToCache)
+        val library = allLibraries.single { it.libraryFile == libraryToAddToCacheFile }
+        return cacheDirectory.child(CachedLibraries.getCachedLibraryName(library)).absolutePath
+    }
+
 
     internal val cachedLibraries: CachedLibraries = run {
         val explicitCacheFiles = configuration.get(KonanConfigKeys.CACHED_LIBRARIES)!!
@@ -33,28 +50,44 @@ class CacheSupport(
             library to cachePath
         }
 
-        val implicitCacheDirectories = configuration.get(KonanConfigKeys.CACHE_DIRECTORIES)!!
-                .map {
-                    File(it).takeIf { it.isDirectory }
-                            ?: configuration.reportCompilationError("cache directory $it is not found or not a directory")
-                }
+        val optimized = configuration.getBoolean(KonanConfigKeys.OPTIMIZATION)
+        if (optimized && (explicitCacheFiles.isNotEmpty() || implicitCacheDirectories.isNotEmpty()))
+            configuration.report(CompilerMessageSeverity.WARNING, "Cached libraries will not be used for optimized compilation")
 
         CachedLibraries(
                 target = target,
                 allLibraries = allLibraries,
-                explicitCaches = explicitCaches,
-                implicitCacheDirectories = implicitCacheDirectories
+                explicitCaches = if (optimized) emptyMap() else explicitCaches,
+                implicitCacheDirectories = if (optimized) emptyList() else implicitCacheDirectories
         )
     }
 
-    internal val librariesToCache: Set<KotlinLibrary> = configuration.get(KonanConfigKeys.LIBRARIES_TO_CACHE)!!
-            .map { File(it) }.map {
-                fileToLibrary[it] ?: error("library to cache\n" +
-                        "  ${it.absolutePath}\n" +
-                        "not found among resolved libraries:\n  " +
-                        allLibraries.joinToString("\n  ") { it.libraryFile.absolutePath })
-            }.toSet()
-            .also { if (!produce.isCache) check(it.isEmpty()) }
+    private fun getLibrary(file: File) =
+            fileToLibrary[file] ?: error("library to cache\n" +
+                    "  ${file.absolutePath}\n" +
+                    "not found among resolved libraries:\n  " +
+                    allLibraries.joinToString("\n  ") { it.libraryFile.absolutePath })
+
+    internal val librariesToCache: Set<KotlinLibrary> = run {
+        val libraryToAddToCachePath = configuration.get(KonanConfigKeys.LIBRARY_TO_ADD_TO_CACHE)
+        if (libraryToAddToCachePath.isNullOrEmpty()) {
+            configuration.get(KonanConfigKeys.LIBRARIES_TO_CACHE)!!
+                    .map { getLibrary(File(it)) }
+                    .toSet()
+                    .also { if (!produce.isCache) check(it.isEmpty()) }
+        } else {
+            val libraryToAddToCacheFile = File(libraryToAddToCachePath)
+            val libraryToAddToCache = getLibrary(libraryToAddToCacheFile)
+            val libraryCache = cachedLibraries.getLibraryCache(libraryToAddToCache)
+            if (libraryCache == null)
+                setOf(libraryToAddToCache)
+            else
+                emptySet()
+        }
+    }
+
+    internal val preLinkCaches: Boolean =
+            configuration.get(KonanConfigKeys.PRE_LINK_CACHES, false)
 
     init {
         // Ensure dependencies of every cached library are cached too:
@@ -88,6 +121,11 @@ class CacheSupport(
                 configuration.reportCompilationError("Can't cache library '${it.libraryName}' " +
                         "that is already cached in '${cache.path}'")
             }
+        }
+
+        if ((librariesToCache.isNotEmpty() || cachedLibraries.hasDynamicCaches || cachedLibraries.hasStaticCaches)
+                && configuration.getBoolean(KonanConfigKeys.OPTIMIZATION)) {
+            configuration.reportCompilationError("Cache cannot be used in optimized compilation")
         }
     }
 }

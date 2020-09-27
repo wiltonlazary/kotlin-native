@@ -46,25 +46,13 @@
 
 namespace {
 
-// TODO: it seems to be very common case; does C++ std library provide something like this?
-class AutoFree {
- private:
-  void* mem_;
-
- public:
-  AutoFree(void* mem): mem_(mem) {}
-
-  ~AutoFree() {
-    konan::free(mem_);
-  }
-};
-
 // RuntimeUtils.kt
 extern "C" void ReportUnhandledException(KRef throwable);
 extern "C" void ExceptionReporterLaunchpad(KRef reporter, KRef throwable);
 
 KRef currentUnhandledExceptionHook = nullptr;
 int32_t currentUnhandledExceptionHookLock = 0;
+int32_t currentUnhandledExceptionHookCookie = 0;
 
 #if USE_GCC_UNWIND
 struct Backtrace {
@@ -114,6 +102,14 @@ _Unwind_Reason_Code unwindCallback(
   return _URC_NO_REASON;
 }
 #endif
+
+THREAD_LOCAL_VARIABLE bool disallowSourceInfo = false;
+
+SourceInfo getSourceInfo(KConstRef stackTrace, int index) {
+  return disallowSourceInfo
+      ? SourceInfo { .fileName = nullptr, .lineNumber = -1, .column = -1 }
+      : Kotlin_getSourceInfo(*PrimitiveArrayAddressOfElementAt<KNativePtr>(stackTrace->array(), index));
+}
 
 }  // namespace
 
@@ -165,7 +161,7 @@ OBJ_GETTER(GetStackTraceStrings, KConstRef stackTrace) {
   ObjHolder resultHolder;
   ObjHeader* strings = AllocArrayInstance(theArrayTypeInfo, size, resultHolder.slot());
 #if USE_GCC_UNWIND
-  for (int index = 0; index < size; ++index) {
+  for (uint32_t index = 0; index < size; ++index) {
     KNativePtr address = Kotlin_NativePtrArray_get(stackTrace, index);
     char symbol[512];
     if (!AddressToSymbol((const void*) address, symbol, sizeof(symbol))) {
@@ -182,9 +178,9 @@ OBJ_GETTER(GetStackTraceStrings, KConstRef stackTrace) {
   if (size > 0) {
     char **symbols = backtrace_symbols(PrimitiveArrayAddressOfElementAt<KNativePtr>(stackTrace->array(), 0), size);
     RuntimeCheck(symbols != nullptr, "Not enough memory to retrieve the stacktrace");
-    AutoFree autoFree(symbols);
-    for (int index = 0; index < size; ++index) {
-      auto sourceInfo = Kotlin_getSourceInfo(*PrimitiveArrayAddressOfElementAt<KNativePtr>(stackTrace->array(), index));
+
+    for (uint32_t index = 0; index < size; ++index) {
+      auto sourceInfo = getSourceInfo(stackTrace, index);
       const char* symbol = symbols[index];
       const char* result;
       char line[1024];
@@ -203,6 +199,8 @@ OBJ_GETTER(GetStackTraceStrings, KConstRef stackTrace) {
       CreateStringFromCString(result, holder.slot());
       UpdateHeapRef(ArrayAddressOfElementAt(strings->array(), index), holder.obj());
     }
+    // Not konan::free. Used to free memory allocated in backtrace_symbols where malloc is used.
+    free(symbols);
   }
 #endif
   RETURN_OBJ(strings);
@@ -222,13 +220,14 @@ void ThrowException(KRef exception) {
 
 OBJ_GETTER(Kotlin_setUnhandledExceptionHook, KRef hook) {
   RETURN_RESULT_OF(SwapHeapRefLocked,
-    &currentUnhandledExceptionHook, currentUnhandledExceptionHook, hook, &currentUnhandledExceptionHookLock);
+    &currentUnhandledExceptionHook, currentUnhandledExceptionHook, hook, &currentUnhandledExceptionHookLock,
+    &currentUnhandledExceptionHookCookie);
 }
 
 void OnUnhandledException(KRef throwable) {
   ObjHolder handlerHolder;
   auto* handler = SwapHeapRefLocked(&currentUnhandledExceptionHook, currentUnhandledExceptionHook, nullptr,
-     &currentUnhandledExceptionHookLock, handlerHolder.slot());
+     &currentUnhandledExceptionHookLock,  &currentUnhandledExceptionHookCookie, handlerHolder.slot());
   if (handler == nullptr) {
     ReportUnhandledException(throwable);
   } else {
@@ -312,3 +311,7 @@ void SetKonanTerminateHandler() {
 #endif // KONAN_OBJC_INTEROP
 
 } // extern "C"
+
+void DisallowSourceInfo() {
+  disallowSourceInfo = true;
+}

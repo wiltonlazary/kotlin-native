@@ -3,6 +3,8 @@
  * that can be found in the LICENSE file.
  */
 
+// FILE: hello.kt
+
 import kotlinx.cinterop.*
 
 import kotlin.native.CName
@@ -139,3 +141,17 @@ fun getNullableString(param: Int) : String? {
         return null
     }
 }
+
+fun getVector128() = vectorOf(1, 2, 3, 4)
+
+// FILE: gh3952.sync.kt
+
+package gh3952.sync
+
+class PlainSync {}
+
+// FILE: gh3952.nested.sync.kt
+
+package gh3952.nested.sync
+
+class NestedSync {}

@@ -1,29 +1,33 @@
 package org.jetbrains.kotlin.backend.konan.serialization
 
 import org.jetbrains.kotlin.backend.common.LoggingContext
-import org.jetbrains.kotlin.backend.common.serialization.IrModuleSerializer
-import org.jetbrains.kotlin.backend.konan.RuntimeNames
-import org.jetbrains.kotlin.backend.konan.llvm.KonanMangler
-import org.jetbrains.kotlin.backend.common.serialization.DeclarationTable
-import org.jetbrains.kotlin.backend.common.serialization.DescriptorTable
-import org.jetbrains.kotlin.ir.backend.js.lower.serialization.ir.JsGlobalDeclarationTable
-import org.jetbrains.kotlin.ir.backend.js.lower.serialization.ir.JsIrFileSerializer
-import org.jetbrains.kotlin.ir.declarations.IrClass
+import org.jetbrains.kotlin.backend.common.serialization.*
+import org.jetbrains.kotlin.backend.common.serialization.signature.IdSignatureSerializer
+import org.jetbrains.kotlin.backend.konan.ir.interop.IrProviderForCEnumAndCStructStubs
+import org.jetbrains.kotlin.descriptors.DeclarationDescriptor
 import org.jetbrains.kotlin.ir.declarations.IrFile
-import org.jetbrains.kotlin.ir.declarations.IrFunction
 import org.jetbrains.kotlin.ir.descriptors.IrBuiltIns
-import org.jetbrains.kotlin.ir.util.hasAnnotation
+import org.jetbrains.kotlin.ir.symbols.IrSymbol
 
 class KonanIrModuleSerializer(
     logger: LoggingContext,
     irBuiltIns: IrBuiltIns,
-    private val descriptorTable: DescriptorTable
+    private val expectDescriptorToSymbol: MutableMap<DeclarationDescriptor, IrSymbol>,
+    val skipExpects: Boolean
 ) : IrModuleSerializer<KonanIrFileSerializer>(logger) {
 
+    private val signaturer = IdSignatureSerializer(KonanManglerIr)
+    private val globalDeclarationTable = KonanGlobalDeclarationTable(signaturer, irBuiltIns)
 
-    private val globalDeclarationTable = KonanGlobalDeclarationTable(irBuiltIns)
+    // We skip files with IR for C structs and enums because they should be
+    // generated anew.
+    //
+    // See [IrProviderForCEnumAndCStructStubs.kt#L31] on why we generate IR.
+    // We may switch from IR generation to LazyIR later (at least for structs; enums are tricky)
+    // without changing kotlin libraries that depend on interop libraries.
+    override fun backendSpecificFileFilter(file: IrFile): Boolean =
+            file.fileEntry.name != IrProviderForCEnumAndCStructStubs.cTypeDefinitionsFileName
 
     override fun createSerializerForFile(file: IrFile): KonanIrFileSerializer =
-            KonanIrFileSerializer(logger, DeclarationTable(descriptorTable, globalDeclarationTable, 0))
-
+            KonanIrFileSerializer(logger, KonanDeclarationTable(globalDeclarationTable), expectDescriptorToSymbol, skipExpects = skipExpects)
 }

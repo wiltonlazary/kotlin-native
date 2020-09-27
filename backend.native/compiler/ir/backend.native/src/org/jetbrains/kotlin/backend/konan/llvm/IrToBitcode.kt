@@ -7,15 +7,12 @@ package org.jetbrains.kotlin.backend.konan.llvm
 
 import kotlinx.cinterop.*
 import llvm.*
-import org.jetbrains.kotlin.backend.common.descriptors.allParameters
 import org.jetbrains.kotlin.backend.common.ir.ir2string
 import org.jetbrains.kotlin.backend.common.lower.inline.InlinerExpressionLocationHint
 import org.jetbrains.kotlin.backend.konan.*
 import org.jetbrains.kotlin.backend.konan.descriptors.*
 import org.jetbrains.kotlin.backend.konan.ir.*
 import org.jetbrains.kotlin.backend.konan.llvm.coverage.LLVMCoverageInstrumentation
-import org.jetbrains.kotlin.backend.konan.optimizations.DataFlowIR
-import org.jetbrains.kotlin.builtins.KotlinBuiltIns
 import org.jetbrains.kotlin.builtins.UnsignedType
 import org.jetbrains.kotlin.descriptors.Modality
 import org.jetbrains.kotlin.ir.IrElement
@@ -29,37 +26,51 @@ import org.jetbrains.kotlin.ir.util.*
 import org.jetbrains.kotlin.ir.visitors.IrElementVisitorVoid
 import org.jetbrains.kotlin.ir.visitors.acceptChildrenVoid
 import org.jetbrains.kotlin.ir.visitors.acceptVoid
+import org.jetbrains.kotlin.konan.ForeignExceptionMode
 import org.jetbrains.kotlin.konan.target.CompilerOutputKind
+import org.jetbrains.kotlin.konan.target.Family
+import org.jetbrains.kotlin.name.FqName
+import org.jetbrains.kotlin.name.Name
 import org.jetbrains.kotlin.resolve.descriptorUtil.classId
 import org.jetbrains.kotlin.resolve.descriptorUtil.module
 
-internal enum class FieldStorage {
+internal enum class FieldStorageKind {
     MAIN_THREAD,
     SHARED,
     THREAD_LOCAL
 }
 
-// TODO: maybe unannotated singleton objects shall be accessed from main thread only as well?
-val IrClass.objectIsShared get() =
-    !annotations.hasAnnotation(KonanFqNames.threadLocal)
+internal enum class ObjectStorageKind {
+    PERMANENT,
+    THREAD_LOCAL,
+    SHARED
+}
 
-internal val IrField.storageClass: FieldStorage get() {
+// TODO: maybe unannotated singleton objects shall be accessed from main thread only as well?
+internal val IrField.storageKind: FieldStorageKind get() {
     // TODO: Is this correct?
     val annotations = correspondingPropertySymbol?.owner?.annotations ?: annotations
     return when {
-        annotations.hasAnnotation(KonanFqNames.threadLocal) -> FieldStorage.THREAD_LOCAL
-        !isFinal -> FieldStorage.MAIN_THREAD
-        annotations.hasAnnotation(KonanFqNames.sharedImmutable) -> FieldStorage.SHARED
+        annotations.hasAnnotation(KonanFqNames.threadLocal) -> FieldStorageKind.THREAD_LOCAL
+        !isFinal -> FieldStorageKind.MAIN_THREAD
+        annotations.hasAnnotation(KonanFqNames.sharedImmutable) -> FieldStorageKind.SHARED
         // TODO: simplify, once IR types are fully there.
         (type.classifierOrNull?.owner as? IrAnnotationContainer)
-                ?.annotations?.hasAnnotation(KonanFqNames.frozen) == true -> FieldStorage.SHARED
-        else -> FieldStorage.MAIN_THREAD
+                ?.annotations?.hasAnnotation(KonanFqNames.frozen) == true -> FieldStorageKind.SHARED
+        else -> FieldStorageKind.MAIN_THREAD
     }
 }
 
+internal fun IrClass.storageKind(context: Context): ObjectStorageKind = when {
+    this.annotations.hasAnnotation(KonanFqNames.threadLocal) &&
+            context.config.threadsAreAllowed -> ObjectStorageKind.THREAD_LOCAL
+    this.hasConstStateAndNoSideEffects(context) -> ObjectStorageKind.PERMANENT
+    else -> ObjectStorageKind.SHARED
+}
+
 val IrField.isMainOnlyNonPrimitive get() = when  {
-        KotlinBuiltIns.isPrimitiveType(descriptor.type) -> false
-        else -> storageClass == FieldStorage.MAIN_THREAD
+        type.computePrimitiveBinaryTypeOrNull() != null -> false
+        else -> storageKind == FieldStorageKind.MAIN_THREAD
     }
 
 internal fun verifyModule(llvmModule: LLVMModuleRef, current: String = "") {
@@ -88,14 +99,17 @@ internal class RTTIGeneratorVisitor(context: Context) : IrElementVisitorVoid {
 
     override fun visitClass(declaration: IrClass) {
         super.visitClass(declaration)
-
-        generator.generate(declaration)
-
+        if (declaration.requiresRtti()) {
+            generator.generate(declaration)
+        }
         if (declaration.isKotlinObjCClass()) {
             kotlinObjCClassInfoGenerator.generate(declaration)
         }
     }
 
+    fun dispose() {
+        generator.dispose()
+    }
 }
 
 //-------------------------------------------------------------------------//
@@ -120,6 +134,8 @@ internal interface CodeContext {
     val exceptionHandler: ExceptionHandler
 
     fun genThrow(exception: LLVMValueRef)
+
+    val stackLocalsManager: StackLocalsManager
 
     /**
      * Declares the variable.
@@ -172,7 +188,7 @@ internal interface CodeContext {
     /**
      * Returns location information for given source location [LocationInfo].
      */
-    fun location(line:Int, column: Int): LocationInfo?
+    fun location(offset: Int): LocationInfo?
 
     /**
      * Returns [DIScopeOpaqueRef] instance for corresponding scope.
@@ -205,10 +221,13 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
         override val exceptionHandler: ExceptionHandler
             get() = currentCodeContext.exceptionHandler
 
+        override val stackLocalsManager: StackLocalsManager
+            get() = currentCodeContext.stackLocalsManager
+
         override fun evaluateCall(function: IrFunction, args: List<LLVMValueRef>, resultLifetime: Lifetime, superClass: IrClass?) =
                 evaluateSimpleFunctionCall(function, args, resultLifetime, superClass)
 
-        override fun evaluateExplicitArgs(expression: IrMemberAccessExpression): List<LLVMValueRef> =
+        override fun evaluateExplicitArgs(expression: IrFunctionAccessExpression): List<LLVMValueRef> =
                 this@CodeGeneratorVisitor.evaluateExplicitArgs(expression)
 
         override fun evaluateExpression(value: IrExpression): LLVMValueRef =
@@ -235,6 +254,8 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
 
         override fun genThrow(exception: LLVMValueRef) = unsupported()
 
+        override val stackLocalsManager: StackLocalsManager get() = unsupported()
+
         override fun genDeclareVariable(variable: IrVariable, value: LLVMValueRef?, variableLocation: VariableDebugLocation?) = unsupported(variable)
 
         override fun getDeclaredVariable(variable: IrVariable) = -1
@@ -251,7 +272,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
 
         override fun returnableBlockScope(): CodeContext? = null
 
-        override fun location(line: Int, column: Int): LocationInfo? = unsupported()
+        override fun location(offset: Int): LocationInfo? = unsupported()
 
         override fun scope(): DIScopeOpaqueRef? = unsupported()
     }
@@ -302,13 +323,9 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
          * We can't switch context safely, only for symbolzation needs: location, scope detection.
          */
         using(object: InnerScopeImpl() {
-            override fun location(line: Int, column: Int): LocationInfo? {
-                return functionContext.location(line, column)
-            }
+            override fun location(offset: Int): LocationInfo? = functionContext.location(offset)
 
-            override fun scope(): DIScopeOpaqueRef? {
-                return functionContext.scope()
-            }
+            override fun scope(): DIScopeOpaqueRef? = functionContext.scope()
 
         }) {
             return block()
@@ -351,8 +368,10 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
     //-------------------------------------------------------------------------//
 
     val kVoidFuncType = functionType(voidType)
-    val kInitFuncType = functionType(voidType, false, int32Type)
     val kNodeInitType = LLVMGetTypeByName(context.llvmModule, "struct.InitNode")!!
+    val kMemoryStateType = LLVMGetTypeByName(context.llvmModule, "struct.MemoryState")!!
+    val kInitFuncType = functionType(voidType, false, int32Type, pointerType(kMemoryStateType))
+
     //-------------------------------------------------------------------------//
 
     val INIT_GLOBALS = 0
@@ -362,6 +381,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
 
     private fun createInitBody(): LLVMValueRef {
         val initFunction = LLVMAddFunction(context.llvmModule, "", kInitFuncType)!!
+        LLVMSetLinkage(initFunction, LLVMLinkage.LLVMPrivateLinkage)
         generateFunction(codegen, initFunction) {
             using(FunctionScope(initFunction, "init_body", it)) {
                 val bbInit = basicBlock("init", null)
@@ -381,13 +401,21 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
 
                 // Globals initalizers may contain accesses to objects, so visit them first.
                 appendingTo(bbInit) {
+                    // Bit clumsy, global init may need access to TLS, thus it has to be ready to that point.
+                    if (context.llvm.tlsCount > 0) {
+                        val memory = LLVMGetParam(initFunction, 1)!!
+                        call(context.llvm.addTLSRecord, listOf(memory, context.llvm.tlsKey,
+                                Int32(context.llvm.tlsCount).llvm))
+                    }
                     context.llvm.fileInitializers
-                            .forEach {
-                                if (it.initializer?.expression !is IrConst<*>?) {
-                                    if (it.storageClass != FieldStorage.THREAD_LOCAL) {
-                                        val initialization = evaluateExpression(it.initializer!!.expression)
-                                        val address = context.llvmDeclarations.forStaticField(it).storage
-                                        if (it.storageClass == FieldStorage.SHARED)
+                            .forEach { irField ->
+                                if (irField.initializer?.expression !is IrConst<*>?) {
+                                    if (irField.storageKind != FieldStorageKind.THREAD_LOCAL) {
+                                        val initialization = evaluateExpression(irField.initializer!!.expression)
+                                        val address = context.llvmDeclarations.forStaticField(irField).storageAddressAccess.getAddress(
+                                                functionGenerationContext
+                                        )
+                                        if (irField.storageKind == FieldStorageKind.SHARED)
                                             freeze(initialization, currentCodeContext.exceptionHandler)
                                         storeAny(initialization, address, false)
                                     }
@@ -397,41 +425,46 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
                 }
 
                 appendingTo(bbLocalInit) {
+                    if (context.llvm.tlsCount > 0) {
+                        val memory = LLVMGetParam(initFunction, 1)!!
+                        call(context.llvm.addTLSRecord, listOf(memory, context.llvm.tlsKey,
+                                Int32(context.llvm.tlsCount).llvm))
+                    }
                     context.llvm.fileInitializers
-                            .forEach {
-                                if (it.initializer?.expression !is IrConst<*>?) {
-                                   if (it.storageClass == FieldStorage.THREAD_LOCAL) {
-                                       val initialization = evaluateExpression(it.initializer!!.expression)
-                                       val address = context.llvmDeclarations.forStaticField(it).storage
-                                       storeAny(initialization, address, false)
-                                    }
+                            .forEach { irField ->
+                                if (irField.initializer != null && irField.storageKind == FieldStorageKind.THREAD_LOCAL) {
+                                    val initialization = evaluateExpression(irField.initializer!!.expression)
+                                    val address = context.llvmDeclarations.forStaticField(irField).storageAddressAccess.getAddress(
+                                            functionGenerationContext
+                                    )
+                                    storeAny(initialization, address, false)
                                 }
                             }
                     ret(null)
                 }
 
                 appendingTo(bbLocalDeinit) {
-                    context.llvm.fileInitializers.forEach {
-                        // Only if a subject for memory management.
-                        if (it.type.binaryTypeIsReference() && it.storageClass == FieldStorage.THREAD_LOCAL) {
-                            val address = context.llvmDeclarations.forStaticField(it).storage
-                            storeHeapRef(codegen.kNullObjHeaderPtr, address)
-                        }
+                    if (context.llvm.tlsCount > 0) {
+                        val memory = LLVMGetParam(initFunction, 1)!!
+                        call(context.llvm.clearTLSRecord, listOf(memory, context.llvm.tlsKey))
                     }
-                    context.llvm.objects.forEach { storeHeapRef(codegen.kNullObjHeaderPtr, it) }
                     ret(null)
                 }
 
                 appendingTo(bbGlobalDeinit) {
                     context.llvm.fileInitializers
                             // Only if a subject for memory management.
-                            .forEach {
-                                if (it.type.binaryTypeIsReference() && it.storageClass != FieldStorage.THREAD_LOCAL) {
-                                    val address = context.llvmDeclarations.forStaticField(it).storage
+                            .forEach {irField ->
+                                if (irField.type.binaryTypeIsReference() && irField.storageKind != FieldStorageKind.THREAD_LOCAL) {
+                                    val address = context.llvmDeclarations.forStaticField(irField).storageAddressAccess.getAddress(
+                                            functionGenerationContext
+                                    )
                                     storeHeapRef(codegen.kNullObjHeaderPtr, address)
                                 }
                             }
-                    context.llvm.sharedObjects.forEach { storeHeapRef(codegen.kNullObjHeaderPtr, it) }
+                    context.llvm.globalSharedObjects.forEach { address ->
+                        storeHeapRef(codegen.kNullObjHeaderPtr, address)
+                    }
                     ret(null)
                 }
             }
@@ -456,6 +489,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
 
     private fun createInitCtor(initNodePtr: LLVMValueRef): LLVMValueRef {
         val ctorFunction = LLVMAddFunction(context.llvmModule, "", kVoidFuncType)!!
+        LLVMSetLinkage(ctorFunction, LLVMLinkage.LLVMPrivateLinkage)
         generateFunction(codegen, ctorFunction) {
             call(context.llvm.appendToInitalizersTail, listOf(initNodePtr))
             ret(null)
@@ -468,13 +502,14 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
     override fun visitFile(declaration: IrFile) {
         // TODO: collect those two in one place.
         context.llvm.fileInitializers.clear()
-        context.llvm.objects.clear()
-        context.llvm.sharedObjects.clear()
+        context.llvm.fileUsesThreadLocalObjects = false
+        context.llvm.globalSharedObjects.clear()
 
+        @Suppress("UNCHECKED_CAST")
         using(FileScope(declaration)) {
             declaration.acceptChildrenVoid(this)
 
-            if (context.llvm.fileInitializers.isEmpty() && context.llvm.objects.isEmpty() && context.llvm.sharedObjects.isEmpty())
+            if (context.llvm.fileInitializers.isEmpty() && !context.llvm.fileUsesThreadLocalObjects && context.llvm.globalSharedObjects.isEmpty())
                 return
 
             // Create global initialization records.
@@ -502,6 +537,9 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
             else
                 super.genContinue(destination)
         }
+
+        override val stackLocalsManager: StackLocalsManager =
+            object : StackLocalsManager by functionGenerationContext.stackLocalsManager { }
     }
 
     //-------------------------------------------------------------------------//
@@ -641,6 +679,8 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
             functionGenerationContext.unreachable()
         }
 
+        override val stackLocalsManager get() = functionGenerationContext.stackLocalsManager
+
         override fun functionScope(): CodeContext = this
 
 
@@ -650,7 +690,8 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
             declaration?.scope() ?: llvmFunction!!.scope(0, subroutineType(context, codegen.llvmTargetData, listOf(context.irBuiltIns.intType)))
         }
 
-        override fun location(line: Int, column: Int) = scope?.let { LocationInfo(it, line, column) }
+        private val fileScope = (fileScope() as? FileScope)
+        override fun location(offset: Int) = scope?.let { scope -> fileScope?.let{LocationInfo(scope, it.file.fileEntry.line(offset), it.file.fileEntry.column(offset)) } }
 
         override fun scope() = scope
     }
@@ -678,27 +719,36 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
                 || declaration.isExternal
                 || body == null)
             return
-
-        generateFunction(codegen, declaration,
-                declaration.location(start = true),
-                declaration.location(start = false)) {
-            using(FunctionScope(declaration, it)) {
-                val parameterScope = ParameterScope(declaration, functionGenerationContext)
-                using(parameterScope) {
-                    using(VariableScope()) {
-                        recordCoverage(body)
-                        if (declaration.isReifiedInline) {
-                            callDirect(context.ir.symbols.throwIllegalStateExceptionWithMessage.owner,
-                                    listOf(context.llvm.staticData.kotlinStringLiteral(
-                                            "unsupported call of reified inlined function `${declaration.fqNameForIrSerialization}`").llvm),
-                                    Lifetime.IRRELEVANT)
-                            return@using
-                        }
-                        when (body) {
-                            is IrBlockBody -> body.statements.forEach { generateStatement(it) }
-                            is IrExpressionBody -> generateStatement(body.expression)
-                            is IrSyntheticBody -> throw AssertionError("Synthetic body ${body.kind} has not been lowered")
-                            else -> TODO(ir2string(body))
+        val isNotInlinedLambda = declaration.origin == IrDeclarationOrigin.LOCAL_FUNCTION_FOR_LAMBDA
+        val file = ((declaration as? IrSimpleFunction)?.attributeOwnerId as? IrSimpleFunction)?.file.takeIf {
+            it ?: return@takeIf false
+            (currentCodeContext.fileScope() as FileScope).file != it && isNotInlinedLambda
+        }
+        val scope = file?.let {
+            FileScope(it)
+        }
+        using(scope) {
+            generateFunction(codegen, declaration,
+                    declaration.location(start = true),
+                    declaration.location(start = false)) {
+                using(FunctionScope(declaration, it)) {
+                    val parameterScope = ParameterScope(declaration, functionGenerationContext)
+                    using(parameterScope) usingParameterScope@{
+                        using(VariableScope()) usingVariableScope@{
+                            recordCoverage(body)
+                            if (declaration.isReifiedInline) {
+                                callDirect(context.ir.symbols.throwIllegalStateExceptionWithMessage.owner,
+                                        listOf(context.llvm.staticData.kotlinStringLiteral(
+                                                "unsupported call of reified inlined function `${declaration.fqNameForIrSerialization}`").llvm),
+                                        Lifetime.IRRELEVANT)
+                                return@usingVariableScope
+                            }
+                            when (body) {
+                                is IrBlockBody -> body.statements.forEach { generateStatement(it) }
+                                is IrExpressionBody -> error("IrExpressionBody should've been lowered")
+                                is IrSyntheticBody -> throw AssertionError("Synthetic body ${body.kind} has not been lowered")
+                                else -> TODO(ir2string(body))
+                            }
                         }
                     }
                 }
@@ -726,7 +776,8 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
 
     override fun visitClass(declaration: IrClass) {
         context.log{"visitClass                     : ${ir2string(declaration)}"}
-        if (declaration.isNonGeneratedAnnotation()) {
+
+        if (declaration.isNonGeneratedAnnotation() || !declaration.requiresCodeGeneration()) {
             // For non-generated annotation classes generate only nested classes.
             declaration.declarations
                     .filterIsInstance<IrClass>()
@@ -738,9 +789,45 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
                 it.acceptVoid(this)
             }
         }
+
+        if (declaration.kind.isSingleton && !declaration.isUnit()) {
+            val singleton = context.llvmDeclarations.forSingleton(declaration)
+            val access = singleton.instanceStorage
+            if (access is GlobalAddressAccess) {
+                // Global objects are kept in a data segment and can be accessed by any module (if exported) and also
+                // they need to be initialized statically.
+                LLVMSetInitializer(access.getAddress(null), if (declaration.storageKind(context) == ObjectStorageKind.PERMANENT)
+                    context.llvm.staticData.createConstKotlinObject(declaration,
+                            *computeFields(declaration)).llvm else codegen.kNullObjHeaderPtr)
+            } else {
+                // Thread local objects are kept in a special map, so they need a getter function to be accessible
+                // by other modules.
+                val isObjCCompanion = declaration.isCompanion && declaration.parentAsClass.isObjCClass()
+                // If can be exported and can be instantiated.
+                if (declaration.isExported() && !isObjCCompanion &&
+                        declaration.constructors.singleOrNull() { it.valueParameters.size == 0 } != null) {
+                    val valueGetterName = declaration.threadLocalObjectStorageGetterSymbolName
+                    generateFunction(codegen,
+                            functionType(codegen.kObjHeaderPtrPtr, false),
+                            valueGetterName) {
+                        val value = access.getAddress(this)
+                        ret(value)
+                    }
+                    // Getter uses TLS object, so need to ensure that this file's (de)initializer function
+                    // inits and deinits TLS.
+                    context.llvm.fileUsesThreadLocalObjects = true
+                }
+            }
+        }
     }
 
-    //-------------------------------------------------------------------------//
+    private fun computeFields(declaration: IrClass): Array<ConstValue> {
+        val fields = context.getLayoutBuilder(declaration).fields
+        return Array(fields.size) { index ->
+            val initializer = fields[index].initializer!!.expression as IrConst<*>
+            constValue(evaluateConst(initializer))
+        }
+    }
 
     override fun visitProperty(declaration: IrProperty) {
         declaration.getter?.acceptVoid(this)
@@ -755,16 +842,16 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
         debugFieldDeclaration(declaration)
         if (context.needGlobalInit(declaration)) {
             val type = codegen.getLLVMType(declaration.type)
-            val globalProperty = context.llvmDeclarations.forStaticField(declaration).storage
+            val globalPropertyAccess = context.llvmDeclarations.forStaticField(declaration).storageAddressAccess
             val initializer = declaration.initializer?.expression as? IrConst<*>
-            if (initializer != null)
-                LLVMSetInitializer(globalProperty, evaluateExpression(initializer))
-            else
-                LLVMSetInitializer(globalProperty, LLVMConstNull(type))
+            val globalProperty = (globalPropertyAccess as? GlobalAddressAccess)?.getAddress(null)
+            if (globalProperty != null) {
+                LLVMSetInitializer(globalProperty, if (initializer != null)
+                    evaluateExpression(initializer) else LLVMConstNull(type))
+                // (Cannot do this before the global is initialized).
+                LLVMSetLinkage(globalProperty, LLVMLinkage.LLVMInternalLinkage)
+            }
             context.llvm.fileInitializers.add(declaration)
-
-            // (Cannot do this before the global is initialized).
-            LLVMSetLinkage(globalProperty, LLVMLinkage.LLVMInternalLinkage)
         }
     }
 
@@ -1024,7 +1111,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
                     }
                 }
 
-                if (catch.parameter.type == context.builtIns.throwable.defaultType) {
+                if (catch.catchParameter.descriptor.type == context.builtIns.throwable.defaultType) {
                     genCatchBlock()
                     return      // Remaining catch clauses are unreachable.
                 } else {
@@ -1214,7 +1301,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
                     builder       = context.debugInfo.builder,
                     functionScope = locationInfo.scope,
                     diType        = element.type.diType(context, codegen.llvmTargetData),
-                    name          = element.descriptor.name,
+                    name          = element.debugNameConversion(),
                     file          = file,
                     line          = locationInfo.line,
                     location      = location)
@@ -1223,7 +1310,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
                     builder       = context.debugInfo.builder,
                     functionScope = locationInfo.scope,
                     diType        = element.type.diType(context, codegen.llvmTargetData),
-                    name          = element.descriptor.name,
+                    name          = element.debugNameConversion(),
                     argNo         = function.allParameters.indexOf(element) + 1,
                     file          = file,
                     line          = locationInfo.line,
@@ -1272,6 +1359,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
             IrTypeOperator.NOT_INSTANCEOF            -> evaluateNotInstanceOf(value)
             IrTypeOperator.SAM_CONVERSION            -> TODO(ir2string(value))
             IrTypeOperator.IMPLICIT_DYNAMIC_CAST     -> TODO(ir2string(value))
+            IrTypeOperator.REINTERPRET_CAST          -> TODO(ir2string(value))
         }
     }
 
@@ -1330,7 +1418,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
             ifThen(not(genInstanceOf(srcArg, dstClass))) {
                 if (dstClass.defaultType.isObjCObjectType()) {
                     callDirect(
-                            context.ir.symbols.ThrowTypeCastException.owner,
+                            context.ir.symbols.throwTypeCastException.owner,
                             emptyList(),
                             Lifetime.GLOBAL
                     )
@@ -1477,22 +1565,28 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
     //-------------------------------------------------------------------------//
 
     private fun evaluateGetField(value: IrGetField): LLVMValueRef {
-        context.log{"evaluateGetField               : ${ir2string(value)}"}
-        if (!value.symbol.owner.isStatic) {
+        context.log { "evaluateGetField               : ${ir2string(value)}" }
+        return if (!value.symbol.owner.isStatic) {
             val thisPtr = evaluateExpression(value.receiver!!)
-            return functionGenerationContext.loadSlot(
-                    fieldPtrOfClass(thisPtr, value.symbol.owner), value.descriptor.isVar())
+            functionGenerationContext.loadSlot(
+                    fieldPtrOfClass(thisPtr, value.symbol.owner), !value.symbol.owner.isFinal)
         } else {
             assert(value.receiver == null)
-            return if (value.symbol.owner.correspondingProperty?.isConst == true) {
-                 evaluateConst(value.symbol.owner.initializer?.expression as IrConst<*>)
+            if (value.symbol.owner.correspondingPropertySymbol?.owner?.isConst == true) {
+                evaluateConst(value.symbol.owner.initializer?.expression as IrConst<*>)
             } else {
                 if (context.config.threadsAreAllowed && value.symbol.owner.isMainOnlyNonPrimitive) {
                     functionGenerationContext.checkMainThread(currentCodeContext.exceptionHandler)
                 }
-                val ptr = context.llvmDeclarations.forStaticField(value.symbol.owner).storage
-                functionGenerationContext.loadSlot(ptr, value.descriptor.isVar())
+                val ptr = context.llvmDeclarations.forStaticField(value.symbol.owner).storageAddressAccess.getAddress(
+                        functionGenerationContext
+                )
+                functionGenerationContext.loadSlot(ptr, !value.symbol.owner.isFinal)
             }
+        }.also {
+            if (value.type.classifierOrNull?.isClassWithFqName(vectorType) == true)
+                LLVMSetAlignment(it, 8)
+
         }
     }
 
@@ -1503,10 +1597,35 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
         return !irClass.isFrozen
     }
 
+    private fun isZeroConstValue(value: IrExpression): Boolean {
+        if (value !is IrConst<*>) return false
+        return when (value.kind) {
+            IrConstKind.Null -> true
+            IrConstKind.Boolean -> (value.value as Boolean) == false
+            IrConstKind.Byte -> (value.value as Byte) == 0.toByte()
+            IrConstKind.Char -> (value.value as Char) == 0.toChar()
+            IrConstKind.Short -> (value.value as Short) == 0.toShort()
+            IrConstKind.Int -> (value.value as Int) == 0
+            IrConstKind.Long -> (value.value as Long) == 0L
+            IrConstKind.Float -> (value.value as Float).toRawBits() == 0
+            IrConstKind.Double -> (value.value as Double).toRawBits() == 0L
+            IrConstKind.String -> false
+        }
+    }
+
     private fun evaluateSetField(value: IrSetField): LLVMValueRef {
         context.log{"evaluateSetField               : ${ir2string(value)}"}
+        if (value.origin == IrStatementOrigin.INITIALIZE_FIELD
+                && isZeroConstValue(value.value)) {
+            check(value.receiver is IrGetValue) { "Only IrGetValue expected for receiver of a field initializer" }
+            // All newly allocated objects are zeroed out, so it is redundant to initialize their
+            // fields with the default values. This is also aligned with the Kotlin/JVM behavior.
+            // See https://youtrack.jetbrains.com/issue/KT-39100 for details.
+            return codegen.theUnitInstanceRef.llvm
+        }
+
         val valueToAssign = evaluateExpression(value.value)
-        if (!value.symbol.owner.isStatic) {
+        val store = if (!value.symbol.owner.isStatic) {
             val thisPtr = evaluateExpression(value.receiver!!)
             assert(thisPtr.type == codegen.kObjHeaderPtr) {
                 LLVMPrintTypeToString(thisPtr.type)?.toKString().toString()
@@ -1515,21 +1634,31 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
                 functionGenerationContext.call(context.llvm.mutationCheck,
                         listOf(functionGenerationContext.bitcast(codegen.kObjHeaderPtr, thisPtr)),
                         Lifetime.IRRELEVANT, ExceptionHandler.Caller)
+
+                if (functionGenerationContext.isObjectType(valueToAssign.type))
+                    functionGenerationContext.call(context.llvm.checkLifetimesConstraint, listOf(thisPtr, valueToAssign))
             }
             functionGenerationContext.storeAny(valueToAssign, fieldPtrOfClass(thisPtr, value.symbol.owner), false)
         } else {
             assert(value.receiver == null)
-            val globalValue = context.llvmDeclarations.forStaticField(value.symbol.owner).storage
-            if (context.config.threadsAreAllowed && value.symbol.owner.isMainOnlyNonPrimitive)
+            val globalAddress = context.llvmDeclarations.forStaticField(value.symbol.owner).storageAddressAccess.getAddress(
+                    functionGenerationContext
+            )
+            if (context.config.threadsAreAllowed && value.symbol.owner.storageKind == FieldStorageKind.MAIN_THREAD)
                 functionGenerationContext.checkMainThread(currentCodeContext.exceptionHandler)
-            if (value.symbol.owner.storageClass == FieldStorage.SHARED)
+            if (value.symbol.owner.storageKind == FieldStorageKind.SHARED)
                 functionGenerationContext.freeze(valueToAssign, currentCodeContext.exceptionHandler)
-            functionGenerationContext.storeAny(valueToAssign, globalValue, false)
+            functionGenerationContext.storeAny(valueToAssign, globalAddress, false)
+        }
+        if (store != null && value.value.type.classifierOrNull?.isClassWithFqName(vectorType) == true) {
+            LLVMSetAlignment(store, 8)
         }
 
         assert (value.type.isUnit())
         return codegen.theUnitInstanceRef.llvm
     }
+
+    private val vectorType = FqName("kotlin.native.Vector128").toUnsafe()
 
     //-------------------------------------------------------------------------//
     private fun fieldPtrOfClass(thisPtr: LLVMValueRef, value: IrField): LLVMValueRef {
@@ -1537,27 +1666,9 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
 
         val typePtr = pointerType(fieldInfo.classBodyType)
 
-        val bodyPtr = getObjectBodyPtr(value.parentAsClass, thisPtr)
-
-        val typedBodyPtr = functionGenerationContext.bitcast(typePtr, bodyPtr)
+        val typedBodyPtr = functionGenerationContext.bitcast(typePtr, thisPtr)
         val fieldPtr = LLVMBuildStructGEP(functionGenerationContext.builder, typedBodyPtr, fieldInfo.index, "")
         return fieldPtr!!
-    }
-
-    private fun getObjectBodyPtr(irClass: IrClass, objectPtr: LLVMValueRef): LLVMValueRef {
-        return if (irClass.isObjCClass()) {
-            assert(irClass.isKotlinObjCClass())
-
-            val objCPtr = callDirect(context.ir.symbols.interopObjCObjectRawValueGetter.owner,
-                    listOf(objectPtr), Lifetime.IRRELEVANT)
-
-            val objCDeclarations = context.llvmDeclarations.forClass(irClass).objCDeclarations!!
-            val bodyOffset = functionGenerationContext.load(objCDeclarations.bodyOffsetGlobal.llvmGlobal)
-
-            functionGenerationContext.gep(objCPtr, bodyOffset)
-        } else {
-            objectPtr
-        }
     }
 
     //-------------------------------------------------------------------------//
@@ -1580,8 +1691,8 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
             IrConstKind.Int    -> return Int32(value.value as Int).llvm
             IrConstKind.Long   -> return Int64(value.value as Long).llvm
             IrConstKind.String -> return evaluateStringConst(value as IrConst<String>)
-            IrConstKind.Float  -> return LLVMConstRealOfString(floatType, (value.value as Float).toString())!!
-            IrConstKind.Double -> return LLVMConstRealOfString(doubleType, (value.value as Double).toString())!!
+            IrConstKind.Float  -> return Float32(value.value as Float).llvm
+            IrConstKind.Double -> return Float64(value.value as Double).llvm
         }
         TODO(ir2string(value))
     }
@@ -1606,15 +1717,13 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
 
         var bbExit : LLVMBasicBlockRef? = null
         var resultPhi : LLVMValueRef? = null
-        private val functionScope: DIScopeOpaqueRef?
-            get() = returnableBlock.inlineFunctionSymbol?.owner?.scope()
-        private val outerScope = currentCodeContext.scope()
+        private val functionScope by lazy { returnableBlock.inlineFunctionSymbol?.owner?.scope() }
 
         private fun getExit(): LLVMBasicBlockRef {
             val location = returnableBlock.inlineFunctionSymbol?.let {
-                location(it.owner.endLine(), it.owner.endColumn())
+                location(it.owner.endOffset)
             } ?: returnableBlock.statements.lastOrNull()?.let {
-                location(it.endLine(), it.endColumn())
+                location(it.endOffset)
             }
             if (bbExit == null) bbExit = functionGenerationContext.basicBlock("returnable_block_exit", location)
             return bbExit!!
@@ -1645,24 +1754,18 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
 
         override fun returnableBlockScope(): CodeContext? = this
 
-        override fun location(line: Int, column: Int): LocationInfo? {
+        override fun location(offset: Int): LocationInfo? {
             return if (returnableBlock.inlineFunctionSymbol != null) {
                 val diScope = functionScope ?: return null
-                val outerFileEntry = outerFileEntry()
-                val inlinedAt = outerContext.location(outerFileEntry.line(returnableBlock.startOffset), outerFileEntry.column(returnableBlock.startOffset))
+                val inlinedAt = outerContext.location(returnableBlock.startOffset)
                         ?: error("no location for inlinedAt:\n" +
                                 "${returnableBlock.startOffset} ${returnableBlock.endOffset}\n" +
                                 returnableBlock.render())
-                LocationInfo(diScope, line, column, inlinedAt)
+                LocationInfo(diScope, file.fileEntry.line(offset), file.fileEntry.column(offset), inlinedAt)
             } else {
-                outerContext.location(line, column)
+                outerContext.location(offset)
             }
         }
-
-        private fun outerFileEntry() =
-                (outerContext.fileScope() as? FileScope)?.file?.fileEntry
-                        ?: error("returnable block should be inlined at some file")
-
 
         /**
          * Note: DILexicalBlocks aren't nested, they should be scoped with the parent function.
@@ -1683,7 +1786,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
     private open inner class FileScope(val file: IrFile) : InnerScopeImpl() {
         override fun fileScope(): CodeContext? = this
 
-        override fun location(line: Int, column: Int) = scope()?.let { LocationInfo(it, line, column) }
+        override fun location(offset: Int) = scope()?.let { LocationInfo(it, file.fileEntry.line(offset), file.fileEntry.column(offset)) }
 
         @Suppress("UNCHECKED_CAST")
         private val scope by lazy {
@@ -1726,11 +1829,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
         val bbExit = returnableBlockScope.bbExit
         if (bbExit != null) {
             if (!functionGenerationContext.isAfterTerminator()) {                 // TODO should we solve this problem once and for all
-                if (returnableBlockScope.resultPhi != null) {
-                    functionGenerationContext.unreachable()
-                } else {
-                    functionGenerationContext.br(bbExit)
-                }
+                functionGenerationContext.unreachable()
             }
             functionGenerationContext.positionAtEnd(bbExit)
         }
@@ -1802,11 +1901,11 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
 
     private val IrElement.startLocation: LocationInfo?
         get() = if (!context.shouldContainLocationDebugInfo() || startOffset == UNDEFINED_OFFSET) null
-            else currentCodeContext.location(startLine(), startColumn())
+            else currentCodeContext.location(startOffset)
 
     private val IrElement.endLocation: LocationInfo?
         get() = if (!context.shouldContainLocationDebugInfo() || startOffset == UNDEFINED_OFFSET) null
-            else currentCodeContext.location(endLine(), endColumn())
+            else currentCodeContext.location(endOffset)
 
     //-------------------------------------------------------------------------//
     private fun IrElement.startLine() = file().fileEntry.line(this.startOffset)
@@ -1848,16 +1947,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
     //-------------------------------------------------------------------------//
     private fun IrFile.file(): DIFileRef {
         return context.debugInfo.files.getOrPut(this.fileEntry.name) {
-            val path = this.fileEntry.name.toFileAndFolder()
-            DICreateCompilationUnit(
-                    builder     = context.debugInfo.builder,
-                    lang        = DWARF.language(context.config),
-                    File        = path.file,
-                    dir         = path.folder,
-                    producer    = DWARF.producer,
-                    isOptimized = 0,
-                    flags       = "",
-                    rv          = DWARF.runtimeVersion(context.config))
+            val path = this.fileEntry.name.toFileAndFolder(context)
             DICreateFile(context.debugInfo.builder, path.file, path.folder)!!
         }
     }
@@ -1874,15 +1964,20 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
     private fun IrFunction.scope(startLine:Int): DIScopeOpaqueRef? {
         if (!context.shouldContainLocationDebugInfo())
             return null
-        val functionLlvmValue = codegen.llvmFunctionOrNull(this)
+        val functionLlvmValue =
+                // TODO: May be tie up inline lambdas to their outer function?
+                if (codegen.isExternal(this) && !KonanBinaryInterface.isExported(this))
+                    null
+                else
+                    codegen.llvmFunctionOrNull(this)
         return if (!isReifiedInline && functionLlvmValue != null) {
             context.debugInfo.subprograms.getOrPut(functionLlvmValue) {
                 memScoped {
                     val subroutineType = subroutineType(context, codegen.llvmTargetData)
-                    val functionLlvmValue = codegen.llvmFunction(this@scope)
-                    diFunctionScope(name.asString(), functionLlvmValue.name!!, startLine, subroutineType).also {
+                    val llvmFunnction = codegen.llvmFunction(this@scope)
+                    diFunctionScope(name.asString(), llvmFunnction.name!!, startLine, subroutineType).also {
                         if (!this@scope.isInline)
-                            DIFunctionAddSubprogram(functionLlvmValue, it)
+                            DIFunctionAddSubprogram(llvmFunnction, it)
                     }
                 }
             } as DIScopeOpaqueRef
@@ -1909,7 +2004,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
     @Suppress("UNCHECKED_CAST")
     private fun diFunctionScope(name: String, linkageName: String, startLine: Int, subroutineType: DISubroutineTypeRef) = DICreateFunction(
                 builder = context.debugInfo.builder,
-                scope = (currentCodeContext.fileScope() as FileScope).file.file() as DIScopeOpaqueRef,
+                scope = context.debugInfo.compilationUnit,
                 name = name,
                 linkageName = linkageName,
                 file = file().file(),
@@ -1941,12 +2036,12 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
      * Returns results in the same order as LLVM function expects, assuming that all explicit arguments
      * exactly correspond to a tail of LLVM parameters.
      */
-    private fun evaluateExplicitArgs(expression: IrMemberAccessExpression): List<LLVMValueRef> {
-        val evaluatedArgs = expression.getArguments().map { (param, argExpr) ->
+    private fun evaluateExplicitArgs(expression: IrFunctionAccessExpression): List<LLVMValueRef> {
+        val evaluatedArgs = expression.getArgumentsWithIr().map { (param, argExpr) ->
             param to evaluateExpression(argExpr)
         }.toMap()
 
-        val allValueParameters = expression.descriptor.allParameters
+        val allValueParameters = expression.symbol.owner.allParameters
 
         return allValueParameters.dropWhile { it !in evaluatedArgs }.map {
             evaluatedArgs[it]!!
@@ -2051,7 +2146,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
                                            else args
         return when {
             function.isTypedIntrinsic -> intrinsicGenerator.evaluateCall(callee, args)
-            function.symbol in context.irBuiltIns.irBuiltInsSymbols -> evaluateOperatorCall(callee, argsWithContinuationIfNeeded)
+            function.isBuiltInOperator -> evaluateOperatorCall(callee, argsWithContinuationIfNeeded)
             else -> evaluateSimpleFunctionCall(function, argsWithContinuationIfNeeded, resultLifetime, callee.superQualifierSymbol?.owner)
         }
     }
@@ -2087,34 +2182,20 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
             val thisValue = when {
                 constructedClass.isArray -> {
                     assert(args.isNotEmpty() && args[0].type == int32Type)
-                    functionGenerationContext.allocArray(codegen.typeInfoValue(constructedClass), args[0],
+                    functionGenerationContext.allocArray(constructedClass, args[0],
                             resultLifetime(callee), currentCodeContext.exceptionHandler)
                 }
-
                 constructedClass == context.ir.symbols.string.owner -> {
                     // TODO: consider returning the empty string literal instead.
                     assert(args.isEmpty())
-                    functionGenerationContext.allocArray(codegen.typeInfoValue(constructedClass), count = kImmZero,
+                    functionGenerationContext.allocArray(constructedClass, count = kImmZero,
                             lifetime = resultLifetime(callee), exceptionHandler = currentCodeContext.exceptionHandler)
                 }
 
-                // TODO: OBJC-CONSTRUCTOR-CALL. Move to InteropLowering.
-                constructedClass.isObjCClass() -> {
-                    assert(constructedClass.isKotlinObjCClass()) // Calls to other ObjC class constructors must be lowered.
-                    val symbols = context.ir.symbols
-                    val rawPtr = callDirect(
-                            symbols.interopAllocObjCObject.owner,
-                            listOf(genGetObjCClass(constructedClass)),
-                            Lifetime.IRRELEVANT
-                    )
+                constructedClass.isObjCClass() -> error("Call should've been lowered: ${callee.dump()}")
 
-                    callDirect(symbols.interopInterpretObjCPointer.owner, listOf(rawPtr), resultLifetime(callee)).also {
-                        // Balance pointer retained by alloc:
-                        callDirect(symbols.interopObjCRelease.owner, listOf(rawPtr), Lifetime.IRRELEVANT)
-                    }
-                }
-
-                else -> functionGenerationContext.allocInstance(constructedClass, resultLifetime(callee))
+                else -> functionGenerationContext.allocInstance(constructedClass, resultLifetime(callee),
+                        currentCodeContext.stackLocalsManager)
             }
             evaluateSimpleFunctionCall(callee.symbol.owner,
                     listOf(thisValue) + args, Lifetime.IRRELEVANT /* constructor doesn't return anything */)
@@ -2133,7 +2214,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
         assert(irClass.isExternalObjCClass())
 
         val annotation = irClass.annotations.findAnnotation(externalObjCClassFqName)!!
-        val protocolGetterName = annotation.getStringValue("protocolGetter")
+        val protocolGetterName = annotation.getAnnotationStringValue("protocolGetter")
         val protocolGetter = context.llvm.externalFunction(
                 protocolGetterName,
                 functionType(int8TypePtr, false),
@@ -2195,6 +2276,13 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
                                 else -> icmpLe(args[0], args[1])
                             }
                         }
+                        functionSymbol == context.irBuiltIns.illegalArgumentExceptionSymbol -> {
+                            callDirect(
+                                    context.ir.symbols.throwIllegalArgumentExceptionWithMessage.owner,
+                                    args,
+                                    Lifetime.GLOBAL
+                            )
+                        }
                         else -> TODO(function.name.toString())
                     }
                 }
@@ -2224,11 +2312,11 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
 
     private fun call(function: IrFunction, llvmFunction: LLVMValueRef, args: List<LLVMValueRef>,
                      resultLifetime: Lifetime): LLVMValueRef {
-        val exceptionHandler = if (function.hasAnnotation(RuntimeNames.filterExceptions)) {
-            functionGenerationContext.filteringExceptionHandler(currentCodeContext)
-        } else {
-            currentCodeContext.exceptionHandler
-        }
+
+        val exceptionHandler = function.annotations.findAnnotation(RuntimeNames.filterExceptions)?.let {
+            val foreignExceptionMode = ForeignExceptionMode.byValue(it.getAnnotationValueOrNull<String>("mode"))
+            functionGenerationContext.filteringExceptionHandler(currentCodeContext, foreignExceptionMode)
+        } ?: currentCodeContext.exceptionHandler
 
         val result = call(llvmFunction, args, resultLifetime, exceptionHandler)
         if (!function.isSuspend && function.returnType.isNothing()) {
@@ -2236,21 +2324,6 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
         }
 
         if (LLVMGetReturnType(getFunctionType(llvmFunction)) == voidType) {
-            return codegen.theUnitInstanceRef.llvm
-        }
-
-        return result
-    }
-
-
-    private fun call(symbol: DataFlowIR.FunctionSymbol, function: LLVMValueRef, args: List<LLVMValueRef>,
-                     resultLifetime: Lifetime): LLVMValueRef {
-        val result = call(function, args, resultLifetime)
-        if (symbol.returnsNothing) {
-            functionGenerationContext.unreachable()
-        }
-
-        if (LLVMGetReturnType(getFunctionType(function)) == voidType) {
             return codegen.theUnitInstanceRef.llvm
         }
 
@@ -2318,7 +2391,18 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
     // Create object { i32, void ()*, i8* } { i32 1, void ()* @ctorFunction, i8* null }
 
     fun createGlobalCtor(ctorFunction: LLVMValueRef): ConstPointer {
-        val priority = kImmInt32One
+        val priority = if (context.config.target.family == Family.MINGW) {
+            // Workaround MinGW bug. Using this value makes the compiler generate
+            // '.ctors' section instead of '.ctors.XXXXX', which can't be recognized by ld
+            // when string table is too long.
+            // More details: https://youtrack.jetbrains.com/issue/KT-39548
+            Int32(65535).llvm
+            // Note: this difference in priorities doesn't actually make initializers
+            // platform-dependent, because handling priorities for initializers
+            // from different object files is platform-dependent anyway.
+        } else {
+            kImmInt32One
+        }
         val data     = kNullInt8Ptr
         val argList  = cValuesOf(priority, ctorFunction, data)
         val ctorItem = LLVMConstNamedStruct(kCtorType, argList, 3)!!
@@ -2327,8 +2411,8 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
 
     //-------------------------------------------------------------------------//
     fun appendStaticInitializers() {
-        // Null for "current" non-library module:
-        val libraries = (context.librariesWithDependencies + listOf(null))
+        // Note: the list of libraries is topologically sorted (in order for initializers to be called correctly).
+        val libraries = (context.llvm.allBitcodeDependencies + listOf(null)/* Null for "current" non-library module */)
 
         val libraryToInitializers = libraries.associateWith {
             mutableListOf<LLVMValueRef>()
@@ -2379,6 +2463,7 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
             LLVMSetLinkage(initGuard, LLVMLinkage.LLVMPrivateLinkage)
             val bbInited = basicBlock("inited", null)
             val bbNeedInit = basicBlock("need_init", null)
+
 
             val value = LLVMBuildLoad(builder, initGuard, "")!!
             condBr(icmpEq(value, kImmZero), bbNeedInit, bbInited)
@@ -2435,7 +2520,23 @@ internal class CodeGeneratorVisitor(val context: Context, val lifetimes: Map<IrE
     }
 }
 
-class NoContextFound : Throwable()
+private fun IrValueParameter.debugNameConversion() = descriptor.name.debugNameConversion()
+
+private fun IrVariable.debugNameConversion() = descriptor.name.debugNameConversion()
+
+private val thisName = Name.special("<this>")
+private val underscoreThisName = Name.identifier("_this")
+/**
+ * HACK: this is workaround for GH-2316, to let IDE some how operate with this.
+ * We're experiencing issue with libclang which is used as compiler of expression in lldb
+ * for current state support Kotlin in lldb:
+ *   1. <this> isn't accepted by libclang as valid variable name.
+ *   2. this is reserved name and compiled in special way.
+ */
+private fun Name.debugNameConversion(): Name = when(this) {
+    thisName -> underscoreThisName
+    else -> this
+}
 
 internal class LocationInfo(val scope: DIScopeOpaqueRef,
                             val line: Int,

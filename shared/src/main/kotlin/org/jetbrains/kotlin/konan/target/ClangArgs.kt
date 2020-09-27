@@ -151,7 +151,7 @@ class ClangArgs(private val configurables: Configurables) : Configurables by con
                         "-isystem$absoluteTargetSysRoot/include/libcxx",
                         "-isystem$absoluteTargetSysRoot/include/libc"
                         ) +
-                    (configurables as ZephyrConfigurables).boardSpecificClangFlags
+                    (configurables as ZephyrConfigurables).constructClangArgs()
             }
             return result
         }
@@ -205,6 +205,7 @@ class ClangArgs(private val configurables: Configurables) : Configurables by con
                 listOf("-DUSE_GCC_UNWIND=1",
                         "-DUSE_PE_COFF_SYMBOLS=1",
                         "-DKONAN_WINDOWS=1",
+                        "-DUNICODE",
                         if (target == KonanTarget.MINGW_X64) "-DKONAN_X64=1" else "-DKONAN_X86=1",
                         "-DKONAN_NO_MEMMEM=1",
                         "-DKONAN_HAS_CXX11_EXCEPTION_FUNCTIONS=1")
@@ -353,7 +354,7 @@ class ClangArgs(private val configurables: Configurables) : Configurables by con
     }
 
     private val extraHostClangArgs =
-            if (configurables is LinuxBasedConfigurables) {
+            if (configurables is GccConfigurables) {
                 listOf("--gcc-toolchain=${configurables.absoluteGccToolchain}")
             } else {
                 emptyList()

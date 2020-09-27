@@ -7,15 +7,16 @@
 
 package kotlin
 
+import kotlin.native.internal.CanBePrecreated
+import kotlin.native.internal.IntrinsicType
 import kotlin.native.internal.NumberConverter
 import kotlin.native.internal.TypedIntrinsic
-import kotlin.native.internal.IntrinsicType
 
 /**
  * Represents a 8-bit signed integer.
  */
 public final class Byte private constructor() : Number(), Comparable<Byte> {
-
+    @CanBePrecreated
     companion object {
         /**
          * A constant holding the minimum value an instance of Byte can have.
@@ -284,6 +285,7 @@ public final class Byte private constructor() : Number(), Comparable<Byte> {
  * Represents a 16-bit signed integer.
  */
 public final class Short private constructor() : Number(), Comparable<Short> {
+    @CanBePrecreated
     companion object {
         /**
          * A constant holding the minimum value an instance of Short can have.
@@ -551,6 +553,7 @@ public final class Short private constructor() : Number(), Comparable<Short> {
  * Represents a 32-bit signed integer.
  */
 public final class Int private constructor() : Number(), Comparable<Int> {
+    @CanBePrecreated
     companion object {
         /**
          * A constant holding the minimum value an instance of Int can have.
@@ -844,6 +847,7 @@ public final class Int private constructor() : Number(), Comparable<Int> {
  * Represents a 64-bit signed integer.
  */
 public final class Long private constructor() : Number(), Comparable<Long> {
+    @CanBePrecreated
     companion object {
         /**
          * A constant holding the minimum value an instance of Long can have.
@@ -1154,18 +1158,31 @@ public final class Float private constructor() : Number(), Comparable<Float> {
          * A constant holding the positive infinity value of Float.
          */
         @Suppress("DIVISION_BY_ZERO")
-        public val POSITIVE_INFINITY: Float = 1.0f / 0.0f
+        public const val POSITIVE_INFINITY: Float = 1.0f / 0.0f
 
         /**
          * A constant holding the negative infinity value of Float.
          */
         @Suppress("DIVISION_BY_ZERO")
-        public val NEGATIVE_INFINITY: Float = -1.0f / 0.0f
+        public const val NEGATIVE_INFINITY: Float = -1.0f / 0.0f
 
         /**
          * A constant holding the "not a number" value of Float.
          */
-        public val NaN: Float = kotlinx.cinterop.bitsToFloat(0x7fc00000)
+        @Suppress("DIVISION_BY_ZERO")
+        public const val NaN: Float = -(0.0f / 0.0f)
+
+        /**
+         * The number of bytes used to represent an instance of Float in a binary form.
+         */
+        @SinceKotlin("1.4")
+        public const val SIZE_BYTES: Int = 4
+
+        /**
+         * The number of bits used to represent an instance of Float in a binary form.
+         */
+        @SinceKotlin("1.4")
+        public const val SIZE_BITS: Int = 32
     }
 
     /**
@@ -1329,6 +1346,7 @@ public final class Float private constructor() : Number(), Comparable<Float> {
      *
      * The resulting `Byte` value is equal to `this.toInt().toByte()`.
      */
+    @Deprecated("Unclear conversion. To achieve the same result convert to Int explicitly and then to Byte.", ReplaceWith("toInt().toByte()"))
     public override fun toByte(): Byte = this.toInt().toByte()
 
     /**
@@ -1343,6 +1361,7 @@ public final class Float private constructor() : Number(), Comparable<Float> {
      *
      * The resulting `Short` value is equal to `this.toInt().toShort()`.
      */
+    @Deprecated("Unclear conversion. To achieve the same result convert to Int explicitly and then to Short.", ReplaceWith("toInt().toShort()"))
     public override fun toShort(): Short = this.toInt().toShort()
 
     /**
@@ -1409,18 +1428,31 @@ public final class Double private constructor() : Number(), Comparable<Double> {
          * A constant holding the positive infinity value of Double.
          */
         @Suppress("DIVISION_BY_ZERO")
-        public val POSITIVE_INFINITY: Double = 1.0 / 0.0
+        public const val POSITIVE_INFINITY: Double = 1.0 / 0.0
 
         /**
          * A constant holding the negative infinity value of Double.
          */
         @Suppress("DIVISION_BY_ZERO")
-        public val NEGATIVE_INFINITY: Double = -1.0 / 0.0
+        public const val NEGATIVE_INFINITY: Double = -1.0 / 0.0
 
         /**
          * A constant holding the "not a number" value of Double.
          */
-        public val NaN: Double = kotlinx.cinterop.bitsToDouble(0x7ff8000000000000L)
+        @Suppress("DIVISION_BY_ZERO")
+        public const val NaN: Double = -(0.0 / 0.0)
+
+        /**
+         * The number of bytes used to represent an instance of Double in a binary form.
+         */
+        @SinceKotlin("1.4")
+        public const val SIZE_BYTES: Int = 8
+
+        /**
+         * The number of bits used to represent an instance of Double in a binary form.
+         */
+        @SinceKotlin("1.4")
+        public const val SIZE_BITS: Int = 64
     }
 
     /**
@@ -1588,6 +1620,7 @@ public final class Double private constructor() : Number(), Comparable<Double> {
      *
      * The resulting `Byte` value is equal to `this.toInt().toByte()`.
      */
+    @Deprecated("Unclear conversion. To achieve the same result convert to Int explicitly and then to Byte.", ReplaceWith("toInt().toByte()"))
     public override fun toByte(): Byte = this.toInt().toByte()
 
     /**
@@ -1602,6 +1635,7 @@ public final class Double private constructor() : Number(), Comparable<Double> {
      *
      * The resulting `Short` value is equal to `this.toInt().toShort()`.
      */
+    @Deprecated("Unclear conversion. To achieve the same result convert to Int explicitly and then to Short.", ReplaceWith("toInt().toShort()"))
     public override fun toShort(): Short = this.toInt().toShort()
 
     /**

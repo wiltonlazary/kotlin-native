@@ -1,5 +1,5 @@
 /*
- * Copyright 2010-2018 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license
+ * Copyright 2010-2020 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license
  * that can be found in the LICENSE file.
  */
 
@@ -8,6 +8,7 @@ package kotlin
 import kotlin.annotation.AnnotationRetention.BINARY
 import kotlin.annotation.AnnotationRetention.SOURCE
 import kotlin.annotation.AnnotationTarget.*
+import kotlin.reflect.KClass
 
 /**
  * Marks the annotated declaration as deprecated.
@@ -35,6 +36,27 @@ public annotation class Deprecated(
     val message: String,
     val replaceWith: ReplaceWith = ReplaceWith(""),
     val level: DeprecationLevel = DeprecationLevel.WARNING
+)
+
+/**
+ * Marks the annotated declaration as deprecated. In contrast to [Deprecated], severity of the reported diagnostic is not a constant value,
+ * but differs depending on the API version of the usage (the value of the `-api-version` argument when compiling the module where
+ * the usage is located). If the API version is greater or equal than [hiddenSince], the declaration will not be accessible from the code
+ * (as if it was deprecated with level [DeprecationLevel.HIDDEN]), otherwise if the API version is greater or equal than [errorSince],
+ * the usage will be marked as an error (as with [DeprecationLevel.ERROR]), otherwise if the API version is greater or equal
+ * than [warningSince], the usage will be marked as a warning (as with [DeprecationLevel.WARNING]), otherwise the annotation is ignored.
+ *
+ * @property warningSince the version, since which this deprecation should be reported as a warning.
+ * @property errorSince the version, since which this deprecation should be reported as a error.
+ * @property hiddenSince the version, since which the annotated declaration should not be available in code.
+ */
+@Target(CLASS, FUNCTION, PROPERTY, ANNOTATION_CLASS, CONSTRUCTOR, PROPERTY_SETTER, PROPERTY_GETTER, TYPEALIAS)
+@MustBeDocumented
+@SinceKotlin("1.4")
+public annotation class DeprecatedSinceKotlin(
+    val warningSince: String = "",
+    val errorSince: String = "",
+    val hiddenSince: String = ""
 )
 
 /**
@@ -88,7 +110,7 @@ public annotation class ParameterName(val name: String)
  * Suppresses the given compilation warnings in the annotated element.
  * @property names names of the compiler diagnostics to suppress.
  */
-@Target(CLASS, ANNOTATION_CLASS, PROPERTY, FIELD, LOCAL_VARIABLE, VALUE_PARAMETER,
+@Target(CLASS, ANNOTATION_CLASS, TYPE_PARAMETER, PROPERTY, FIELD, LOCAL_VARIABLE, VALUE_PARAMETER,
         CONSTRUCTOR, FUNCTION, PROPERTY_GETTER, PROPERTY_SETTER, TYPE, EXPRESSION, FILE, TYPEALIAS)
 @Retention(SOURCE)
 public annotation class Suppress(vararg val names: String)
@@ -149,3 +171,27 @@ public annotation class DslMarker
 @MustBeDocumented
 @SinceKotlin("1.1")
 public annotation class PublishedApi
+
+/**
+ * This annotation indicates what exceptions should be declared by a function when compiled to a platform method.
+ *
+ * When compiling to Objective-C/Swift framework,  non-`suspend`  functions having or inheriting
+ * this annotation are represented as `NSError*`-producing methods in Objective-C
+ * and as `throws` methods in Swift. Representations for `suspend` functions always have
+ * `NSError*`/`Error` parameter in completion handler
+ *
+ * When Kotlin function called from Swift/Objective-C code throws an exception
+ * which is an instance of one of the [exceptionClasses] or their subclasses,
+ * it is propagated as `NSError`. Other Kotlin exceptions reaching Swift/Objective-C
+ * are considered unhandled and cause program termination.
+ *
+ * Note: `suspend` functions without `@Throws` propagate only
+ * [kotlin.coroutines.cancellation.CancellationException] as `NSError`.
+ * Non-`suspend` functions without `@Throws` don't propagate Kotlin exceptions at all.
+ *
+ * @property exceptionClasses the list of checked exception classes that may be thrown by the function.
+ */
+@SinceKotlin("1.4")
+@Target(AnnotationTarget.FUNCTION, AnnotationTarget.CONSTRUCTOR)
+@Retention(AnnotationRetention.BINARY)
+public actual annotation class Throws(actual vararg val exceptionClasses: KClass<out Throwable>)

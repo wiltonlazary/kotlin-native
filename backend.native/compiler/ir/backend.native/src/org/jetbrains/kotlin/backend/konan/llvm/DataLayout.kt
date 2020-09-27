@@ -23,18 +23,21 @@ private fun RuntimeAware.getLlvmType(primitiveBinaryType: PrimitiveBinaryType?) 
     PrimitiveBinaryType.FLOAT -> floatType
     PrimitiveBinaryType.DOUBLE -> doubleType
 
+    PrimitiveBinaryType.VECTOR128 -> vector128Type
     PrimitiveBinaryType.POINTER -> int8TypePtr
 }
 
 internal fun RuntimeAware.getLLVMType(type: IrType): LLVMTypeRef =
-        getLlvmType(type.computePrimitiveBinaryTypeOrNull())
+        runtime.calculatedLLVMTypes.getOrPut(type) { getLlvmType(type.computePrimitiveBinaryTypeOrNull()) }
 
 internal fun RuntimeAware.getLLVMType(type: DataFlowIR.Type) =
         getLlvmType(type.primitiveBinaryType)
 
+internal fun IrType.isVoidAsReturnType() = isUnit() || isNothing()
+
 internal fun RuntimeAware.getLLVMReturnType(type: IrType): LLVMTypeRef {
     return when {
-        type.isUnit() || type.isNothing() -> voidType
+        type.isVoidAsReturnType() -> voidType
         else -> getLLVMType(type)
     }
 }

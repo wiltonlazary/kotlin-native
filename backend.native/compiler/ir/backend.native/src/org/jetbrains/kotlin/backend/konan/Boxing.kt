@@ -6,16 +6,16 @@
 package org.jetbrains.kotlin.backend.konan
 
 import llvm.*
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedSimpleFunctionDescriptor
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedValueParameterDescriptor
 import org.jetbrains.kotlin.backend.konan.ir.KonanSymbols
 import org.jetbrains.kotlin.backend.konan.llvm.*
 import org.jetbrains.kotlin.descriptors.Modality
-import org.jetbrains.kotlin.descriptors.Visibilities
+import org.jetbrains.kotlin.descriptors.DescriptorVisibilities
 import org.jetbrains.kotlin.ir.declarations.*
 import org.jetbrains.kotlin.ir.declarations.impl.IrFunctionImpl
 import org.jetbrains.kotlin.ir.declarations.impl.IrValueParameterImpl
 import org.jetbrains.kotlin.ir.descriptors.IrBuiltIns
+import org.jetbrains.kotlin.ir.descriptors.WrappedSimpleFunctionDescriptor
+import org.jetbrains.kotlin.ir.descriptors.WrappedValueParameterDescriptor
 import org.jetbrains.kotlin.ir.symbols.IrSimpleFunctionSymbol
 import org.jetbrains.kotlin.ir.symbols.impl.IrSimpleFunctionSymbolImpl
 import org.jetbrains.kotlin.ir.symbols.impl.IrValueParameterSymbolImpl
@@ -65,16 +65,19 @@ internal val Context.getBoxFunction: (IrClass) -> IrSimpleFunction by Context.la
             DECLARATION_ORIGIN_INLINE_CLASS_SPECIAL_FUNCTION,
             IrSimpleFunctionSymbolImpl(descriptor),
             Name.special("<${inlinedClass.name}-box>"),
-            Visibilities.PUBLIC,
+            DescriptorVisibilities.PUBLIC,
             Modality.FINAL,
             returnType,
             isInline = false,
             isExternal = false,
             isTailrec = false,
             isSuspend = false,
-            isExpect = false
+            isExpect = false,
+            isFakeOverride = false,
+            isOperator = false,
+            isInfix = false
     ).also { function ->
-        function.valueParameters.add(WrappedValueParameterDescriptor().let {
+        function.valueParameters = listOf(WrappedValueParameterDescriptor().let {
             IrValueParameterImpl(
                     startOffset, endOffset,
                     IrDeclarationOrigin.DEFINED,
@@ -117,16 +120,19 @@ internal val Context.getUnboxFunction: (IrClass) -> IrSimpleFunction by Context.
             DECLARATION_ORIGIN_INLINE_CLASS_SPECIAL_FUNCTION,
             IrSimpleFunctionSymbolImpl(descriptor),
             Name.special("<${inlinedClass.name}-unbox>"),
-            Visibilities.PUBLIC,
+            DescriptorVisibilities.PUBLIC,
             Modality.FINAL,
             returnType,
             isInline = false,
             isExternal = false,
             isTailrec = false,
             isSuspend = false,
-            isExpect = false
+            isExpect = false,
+            isFakeOverride = false,
+            isOperator = false,
+            isInfix = false
     ).also { function ->
-        function.valueParameters.add(WrappedValueParameterDescriptor().let {
+        function.valueParameters = listOf(WrappedValueParameterDescriptor().let {
             IrValueParameterImpl(
                     startOffset, endOffset,
                     IrDeclarationOrigin.DEFINED,

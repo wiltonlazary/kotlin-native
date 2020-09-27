@@ -9,6 +9,7 @@ import org.gradle.api.Action
 import org.gradle.api.DefaultTask
 import org.gradle.api.Project
 import org.gradle.api.Task
+import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.TaskAction
@@ -21,7 +22,7 @@ import java.util.regex.Pattern
 
 import org.jetbrains.kotlin.konan.target.HostManager
 
-abstract class KonanTest : DefaultTask() {
+abstract class KonanTest : DefaultTask(), KonanTestExecutable {
     enum class Logger {
         EMPTY,    // Built without test runner
         GTEST,    // Google test log output
@@ -53,7 +54,7 @@ abstract class KonanTest : DefaultTask() {
     /**
      * Test executable.
      */
-    abstract val executable: String
+    abstract override val executable: String
 
     /**
      * Test source.
@@ -72,7 +73,13 @@ abstract class KonanTest : DefaultTask() {
      * should be done before the build and not run.
      */
     @Input @Optional
-    var doBefore: Action<in Task>? = null
+    override var doBeforeBuild: Action<in Task>? = null
+
+    @Input @Optional
+    override var doBeforeRun: Action<in Task>? = null
+
+    override val buildTasks: List<Task>
+        get() = listOf(project.findKonanBuildTask(name, project.testTarget))
 
     @Suppress("UnstableApiUsage")
     override fun configure(config: Closure<*>): Task {
@@ -96,7 +103,7 @@ abstract class KonanTest : DefaultTask() {
     open fun run() = project.executeAndCheck(project.file(executable).toPath(), arguments)
 
     // Converts to runner's pattern
-    private fun String.convertToPattern() = this.replace('/', '.').replace(".kt", "") + (".*")
+    private fun String.convertToPattern() = this.removeSuffix(".kt").replace("/", ".") + ".*"
 
     internal fun ProcessOutput.print(prepend: String = "") {
         if (project.verboseTest)
@@ -113,20 +120,19 @@ abstract class KonanTest : DefaultTask() {
 /**
  * Create a test task of the given type. Supports configuration with Closure passed form build.gradle file.
  */
-fun <T: KonanTest> Project.createTest(name: String, type: Class<T>, config: Closure<*>): T =
+fun <T: KonanTestExecutable> Project.createTest(name: String, type: Class<T>, config: Closure<*>): T =
         project.tasks.create(name, type).apply {
             // Apply closure set in build.gradle to get all parameters.
             this.configure(config)
             if (enabled) {
-                // Configure test task.
-                val target = project.testTarget
-                // If run task depends on something, compile task should also depend on this.
-                val compileTask = project.tasks.getByName("compileKonan${name.capitalize()}${target.name.capitalize()}")
-                compileTask.sameDependenciesAs(this)
-                // Run task should depend on compile task
-                this.dependsOn(compileTask)
-                if (doBefore != null) compileTask.doFirst(doBefore!!)
-                compileTask.enabled = enabled
+                // If run task depends on something, build tasks should also depend on this.
+                buildTasks.forEach { buildTask ->
+                    buildTask.sameDependenciesAs(this)
+                    // Run task should depend on compile task
+                    this.dependsOn(buildTask)
+                    doBeforeBuild?.let { buildTask.doFirst(it) }
+                    buildTask.enabled = enabled
+                }
             }
         }
 
@@ -146,20 +152,23 @@ open class KonanGTest : KonanTest() {
     var statistics = Statistics()
 
     @TaskAction
-    override fun run() = runProcess(
-            executor = project.executor::execute,
-            executable = executable,
-            args = arguments
-    ).run {
-        parse(stdOut)
-        println("""
+    override fun run() {
+        doBeforeRun?.execute(this)
+        runProcess(
+                executor = {project.executor.execute(it)},
+                executable = executable,
+                args = arguments
+        ).run {
+            parse(stdOut)
+            println("""
                 |stdout:
                 |$stdOut
                 |stderr:
                 |$stdErr
                 |exit code: $exitCode
                 """.trimMargin())
-        check(exitCode == 0) { "Test $executable exited with $exitCode" }
+            check(exitCode == 0) { "Test $executable exited with $exitCode" }
+        }
     }
 
     private fun parse(output: String) = statistics.apply {
@@ -170,7 +179,7 @@ open class KonanGTest : KonanTest() {
                 .apply { if (find()) fail(group(1).toInt()) }
         if (total == 0) {
             // No test were run. Try to find if we've tried to run something
-            this.error(Pattern.compile("\\[={10}] Running ([0-9]*) tests from ([0-9]*) test cases\\..*")
+            error(Pattern.compile("\\[={10}] Running ([0-9]*) tests from ([0-9]*) test cases\\..*")
                     .matcher(output)
                     .run { if (find()) group(1).toInt() else 1 })
         }
@@ -191,7 +200,10 @@ open class KonanLocalTest : KonanTest() {
     override var testLogger = Logger.SILENT
 
     @Input @Optional
-    var expectedExitStatus = 0
+    var expectedExitStatus: Int? = null
+
+    @Input @Optional
+    var expectedExitStatusChecker: (Int) -> Boolean = { it == (expectedExitStatus ?: 0) }
 
     /**
      * Should this test fail or not.
@@ -230,14 +242,15 @@ open class KonanLocalTest : KonanTest() {
 
     @TaskAction
     override fun run() {
+        doBeforeRun?.execute(this)
         val times = if (multiRuns && multiArguments != null) multiArguments!!.size else 1
         var output = ProcessOutput("", "", 0)
         for (i in 1..times) {
             val args = arguments + (multiArguments?.get(i - 1) ?: emptyList())
             output += if (testData != null)
-                runProcessWithInput(project.executor::execute, executable, args, testData!!)
+                runProcessWithInput({project.executor.execute(it)}, executable, args, testData!!)
             else
-                runProcess(project.executor::execute, executable, args)
+                runProcess({project.executor.execute(it)}, executable, args)
         }
         if (compilerMessages) {
             // TODO: as for now it captures output only in the driver task.
@@ -259,9 +272,12 @@ open class KonanLocalTest : KonanTest() {
             exitCode + other.exitCode)
 
     private fun ProcessOutput.check() {
-        val exitCodeMismatch = exitCode != expectedExitStatus
+        val exitCodeMismatch = !expectedExitStatusChecker(exitCode)
         if (exitCodeMismatch) {
-            val message = "Expected exit status: $expectedExitStatus, actual: $exitCode"
+            val message = if (expectedExitStatus != null)
+                "Expected exit status: $expectedExitStatus, actual: $exitCode"
+            else
+                "Actual exit status doesn't match with exit status checker: $exitCode"
             check(expectedFail) { """
                     |Test failed. $message
                     |stdout:
@@ -321,7 +337,11 @@ open class KonanStandaloneTest : KonanLocalTest() {
     var flags: List<String> = listOf()
         get() = if (enableKonanAssertions) field + "-ea" else field
 
-    fun getSources() = buildCompileList(outputDirectory)
+    fun getSources(): Provider<List<String>> = project.provider {
+        val sources = buildCompileList(project.file(source).toPath(), outputDirectory)
+        sources.forEach { it.writeTextToFile() }
+        sources.map { it.path }
+    }
 }
 
 /**
@@ -333,14 +353,9 @@ open class KonanStandaloneTest : KonanLocalTest() {
 open class KonanDriverTest : KonanStandaloneTest() {
     override fun configure(config: Closure<*>): Task {
         super.configure(config)
-        doBefore?.let { doFirst(it) }
+        doFirst { konan() }
+        doBeforeBuild?.let { doFirst(it) }
         return this
-    }
-
-    @TaskAction
-    override fun run() {
-        konan()
-        super.run()
     }
 
     private fun konan() {
@@ -355,7 +370,7 @@ open class KonanDriverTest : KonanStandaloneTest() {
                 add("-target")
                 add(project.testTarget.visibleName)
             }
-            addAll(getSources())
+            addAll(getSources().get())
             addAll(flags)
             addAll(project.globalTestArgs)
         }
@@ -391,22 +406,22 @@ open class KonanLinkTest : KonanStandaloneTest() {
  * It will be replaced then by the actual library name.
  */
 open class KonanDynamicTest : KonanStandaloneTest() {
+    override fun configure(config: Closure<*>): Task {
+        super.configure(config)
+        doFirst { clang() }
+        return this
+    }
+
     /**
      * File path to the C source.
      */
     @Input
     lateinit var cSource: String
 
-    @TaskAction
-    override fun run() {
-        clang()
-        super.run()
-    }
-
     // Replace testlib_api.h and all occurrences of the testlib with the actual name of the test
     private fun processCSource(): String {
         val sourceFile = File(cSource)
-        val prefixedName = if (HostManager.hostIsMingw) "$name" else "lib$name"
+        val prefixedName = if (HostManager.hostIsMingw) name else "lib$name"
         val res = sourceFile.readText()
                 .replace("#include \"testlib_api.h\"", "#include \"${prefixedName}_api.h\"")
                 .replace("testlib", prefixedName)

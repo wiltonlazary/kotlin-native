@@ -7,7 +7,6 @@ package org.jetbrains.kotlin.backend.konan.lower
 
 import org.jetbrains.kotlin.backend.common.ClassLoweringPass
 import org.jetbrains.kotlin.backend.common.CommonBackendContext
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedSimpleFunctionDescriptor
 import org.jetbrains.kotlin.backend.common.ir.createDispatchReceiverParameter
 import org.jetbrains.kotlin.backend.common.lower.createIrBuilder
 import org.jetbrains.kotlin.backend.common.lower.irBlockBody
@@ -18,10 +17,13 @@ import org.jetbrains.kotlin.ir.IrStatement
 import org.jetbrains.kotlin.ir.builders.irDelegatingConstructorCall
 import org.jetbrains.kotlin.ir.declarations.*
 import org.jetbrains.kotlin.ir.declarations.impl.IrFunctionImpl
+import org.jetbrains.kotlin.ir.descriptors.WrappedSimpleFunctionDescriptor
 import org.jetbrains.kotlin.ir.expressions.*
 import org.jetbrains.kotlin.ir.expressions.impl.*
 import org.jetbrains.kotlin.ir.symbols.IrSimpleFunctionSymbol
 import org.jetbrains.kotlin.ir.symbols.impl.IrSimpleFunctionSymbolImpl
+import org.jetbrains.kotlin.ir.types.isPrimitiveType
+import org.jetbrains.kotlin.ir.types.isString
 import org.jetbrains.kotlin.ir.util.*
 import org.jetbrains.kotlin.ir.visitors.IrElementTransformerVoid
 import org.jetbrains.kotlin.ir.visitors.transformChildrenVoid
@@ -64,20 +66,29 @@ internal class InitializersLowering(val context: CommonBackendContext) : ClassLo
                     val initializer = declaration.initializer ?: return declaration
                     val startOffset = initializer.startOffset
                     val endOffset = initializer.endOffset
+                    val initExpression = initializer.expression
                     initializers.add(IrBlockImpl(startOffset, endOffset,
                             context.irBuiltIns.unitType,
-                            STATEMENT_ORIGIN_ANONYMOUS_INITIALIZER,
+                            IrStatementOrigin.INITIALIZE_FIELD,
                             listOf(
                                     IrSetFieldImpl(startOffset, endOffset, declaration.symbol,
                                             IrGetValueImpl(
                                                     startOffset, endOffset,
                                                     irClass.thisReceiver!!.type, irClass.thisReceiver!!.symbol
                                             ),
-                                            initializer.expression,
+                                            initExpression,
                                             context.irBuiltIns.unitType,
-                                            STATEMENT_ORIGIN_ANONYMOUS_INITIALIZER)))
+                                            IrStatementOrigin.INITIALIZE_FIELD)))
                     )
-                    declaration.initializer = null
+
+                    // We shall keep initializer for constants for compile-time instantiation.
+                    declaration.initializer =
+                            if (initExpression is IrConst<*> &&
+                                    (initExpression.type.isPrimitiveType() || initExpression.type.isString())) {
+                                IrExpressionBodyImpl(initExpression.copy())
+                            } else {
+                                null
+                            }
                     return declaration
                 }
             })
@@ -101,14 +112,17 @@ internal class InitializersLowering(val context: CommonBackendContext) : ClassLo
                         DECLARATION_ORIGIN_ANONYMOUS_INITIALIZER,
                         IrSimpleFunctionSymbolImpl(it),
                         "INITIALIZER".synthesizedName,
-                        Visibilities.PRIVATE,
+                        DescriptorVisibilities.PRIVATE,
                         Modality.FINAL,
                         context.irBuiltIns.unitType,
                         isInline = false,
                         isSuspend = false,
                         isExternal = false,
                         isTailrec = false,
-                        isExpect = false
+                        isExpect = false,
+                        isFakeOverride = false,
+                        isOperator = false,
+                        isInfix = false
                 ).apply {
                     it.bind(this)
                     parent = irClass

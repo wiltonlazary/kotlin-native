@@ -9,7 +9,7 @@ import llvm.LLVMStoreSizeOfType
 import llvm.LLVMValueRef
 import org.jetbrains.kotlin.backend.common.atMostOne
 import org.jetbrains.kotlin.backend.konan.*
-import org.jetbrains.kotlin.backend.konan.descriptors.getStringValue
+import org.jetbrains.kotlin.backend.konan.descriptors.getAnnotationStringValue
 import org.jetbrains.kotlin.backend.konan.ir.*
 import org.jetbrains.kotlin.ir.declarations.IrClass
 import org.jetbrains.kotlin.ir.declarations.IrSimpleFunction
@@ -27,7 +27,7 @@ internal class KotlinObjCClassInfoGenerator(override val context: Context) : Con
 
         val instanceMethods = generateInstanceMethodDescs(irClass)
 
-        val companionObject = irClass.declarations.filterIsInstance<IrClass>().atMostOne { it.isCompanion  }
+        val companionObject = irClass.companionObject()
         val classMethods = companionObject?.generateMethodDescs().orEmpty()
 
         val superclassName = irClass.getSuperClassNotAny()!!.let {
@@ -39,13 +39,13 @@ internal class KotlinObjCClassInfoGenerator(override val context: Context) : Con
             it.name.asString().removeSuffix("Protocol")
         }
 
-        val bodySize =
-                LLVMStoreSizeOfType(llvmTargetData, context.llvmDeclarations.forClass(irClass).bodyType).toInt()
+        val exportedClassName = selectExportedClassName(irClass)
+        val className = exportedClassName ?: selectInternalClassName(irClass)
 
-        val className = selectClassName(irClass)?.let { staticData.cStringLiteral(it) } ?: NullPointer(int8Type)
-
+        val classNameLiteral = className?.let { staticData.cStringLiteral(it) } ?: NullPointer(int8Type)
         val info = Struct(runtime.kotlinObjCClassInfo,
-                className,
+                classNameLiteral,
+                Int32(if (exportedClassName != null) 1 else 0),
 
                 staticData.cStringLiteral(superclassName),
                 staticData.placeGlobalConstArray("", int8TypePtr,
@@ -57,18 +57,19 @@ internal class KotlinObjCClassInfoGenerator(override val context: Context) : Con
                 staticData.placeGlobalConstArray("", runtime.objCMethodDescription, classMethods),
                 Int32(classMethods.size),
 
-                Int32(bodySize),
                 objCLLvmDeclarations.bodyOffsetGlobal.pointer,
 
                 irClass.typeInfoPtr,
                 companionObject?.typeInfoPtr ?: NullPointer(runtime.typeInfoType),
 
-                objCLLvmDeclarations.classPointerGlobal.pointer
+                staticData.placeGlobal(
+                        "kobjcclassptr:${irClass.fqNameForIrSerialization}#internal",
+                        NullPointer(int8Type)
+                ).pointer
         )
 
         objCLLvmDeclarations.classInfoGlobal.setInitializer(info)
 
-        objCLLvmDeclarations.classPointerGlobal.setInitializer(NullPointer(int8Type))
         objCLLvmDeclarations.bodyOffsetGlobal.setInitializer(Int32(0))
     }
 
@@ -91,16 +92,18 @@ internal class KotlinObjCClassInfoGenerator(override val context: Context) : Con
         }
     }
 
-    private fun selectClassName(irClass: IrClass): String? {
+    private fun selectExportedClassName(irClass: IrClass): String? {
         val exportObjCClassAnnotation = context.interopBuiltIns.exportObjCClass.fqNameSafe
-        return irClass.getAnnotationArgumentValue(exportObjCClassAnnotation, "name")
-            ?: if (irClass.annotations.hasAnnotation(exportObjCClassAnnotation))
-                irClass.name.asString()
-            else if (irClass.isExported()) {
-                irClass.fqNameForIrSerialization.asString()
-            } else {
-                null // Generate as anonymous.
-            }
+        val explicitName = irClass.getAnnotationArgumentValue<String>(exportObjCClassAnnotation, "name")
+        if (explicitName != null) return explicitName
+
+        return if (irClass.annotations.hasAnnotation(exportObjCClassAnnotation)) irClass.name.asString() else null
+    }
+
+    private fun selectInternalClassName(irClass: IrClass): String? = if (irClass.isExported()) {
+        irClass.fqNameForIrSerialization.asString()
+    } else {
+        null // Generate as anonymous.
     }
 
     private val impType = pointerType(functionType(int8TypePtr, true, int8TypePtr, int8TypePtr))
@@ -122,9 +125,26 @@ internal class KotlinObjCClassInfoGenerator(override val context: Context) : Con
                                 return@mapNotNull null
 
                 ObjCMethodDesc(
-                        annotation.getStringValue("selector"),
-                        annotation.getStringValue("encoding"),
+                        annotation.getAnnotationStringValue("selector"),
+                        annotation.getAnnotationStringValue("encoding"),
                         it.llvmFunction
                 )
             }
+
+    companion object {
+        const val createdClassFieldIndex = 11
+    }
+}
+
+internal fun CodeGenerator.kotlinObjCClassInfo(irClass: IrClass): LLVMValueRef {
+    require(irClass.isKotlinObjCClass())
+    return if (isExternal(irClass)) {
+        importGlobal(
+                irClass.kotlinObjCClassInfoSymbolName,
+                runtime.kotlinObjCClassInfo,
+                origin = irClass.llvmSymbolOrigin
+        )
+    } else {
+        context.llvmDeclarations.forClass(irClass).objCDeclarations!!.classInfoGlobal.llvmGlobal
+    }
 }

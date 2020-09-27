@@ -12,7 +12,7 @@ import org.jetbrains.kotlin.library.KotlinLibrary
 import org.jetbrains.kotlin.library.uniqueName
 import org.jetbrains.kotlin.utils.addToStdlib.firstNotNullResult
 
-internal class CachedLibraries(
+class CachedLibraries(
         private val target: KonanTarget,
         allLibraries: List<KotlinLibrary>,
         explicitCaches: Map<KotlinLibrary, String>,
@@ -21,29 +21,39 @@ internal class CachedLibraries(
 
     class Cache(val kind: Kind, val path: String) {
         enum class Kind { DYNAMIC, STATIC }
+
+        val bitcodeDependencies by lazy {
+            val directory = File(path).absoluteFile.parent
+            File(directory, BITCODE_DEPENDENCIES_FILE_NAME).readStrings()
+        }
+    }
+
+    private fun selectCache(library: KotlinLibrary, cacheDir: File): Cache? {
+        // See Linker.renameOutput why is it ok to have an empty cache directory.
+        if (cacheDir.listFilesOrEmpty.isEmpty()) return null
+        val baseName = getCachedLibraryName(library)
+        val dynamicFile = cacheDir.child(getArtifactName(baseName, CompilerOutputKind.DYNAMIC_CACHE))
+        val staticFile = cacheDir.child(getArtifactName(baseName, CompilerOutputKind.STATIC_CACHE))
+
+        if (dynamicFile.exists && staticFile.exists)
+            error("Both dynamic and static caches files cannot be in the same directory." +
+                    " Library: ${library.libraryName}, path to cache: ${cacheDir.absolutePath}")
+        return when {
+            dynamicFile.exists -> Cache(Cache.Kind.DYNAMIC, dynamicFile.absolutePath)
+            staticFile.exists -> Cache(Cache.Kind.STATIC, staticFile.absolutePath)
+            else -> error("No cache found for library ${library.libraryName} at ${cacheDir.absolutePath}")
+        }
     }
 
     private val allCaches: Map<KotlinLibrary, Cache> = allLibraries.mapNotNull { library ->
         val explicitPath = explicitCaches[library]
 
         val cache = if (explicitPath != null) {
-            val kind = when {
-                explicitPath.endsWith(target.family.dynamicSuffix) -> Cache.Kind.DYNAMIC
-                explicitPath.endsWith(target.family.staticSuffix) -> Cache.Kind.STATIC
-                else -> error("unexpected cache: $explicitPath")
-            }
-            Cache(kind, explicitPath)
+            selectCache(library, File(explicitPath))
+                    ?: error("No cache found for library ${library.libraryName} at $explicitPath")
         } else {
             implicitCacheDirectories.firstNotNullResult { dir ->
-                val baseName = "${library.uniqueName}-cache"
-                val dynamicFile = dir.child(getArtifactName(baseName, CompilerOutputKind.DYNAMIC_CACHE))
-                val staticFile = dir.child(getArtifactName(baseName, CompilerOutputKind.STATIC_CACHE))
-
-                when {
-                    dynamicFile.exists -> Cache(Cache.Kind.DYNAMIC, dynamicFile.absolutePath)
-                    staticFile.exists -> Cache(Cache.Kind.STATIC, staticFile.absolutePath)
-                    else -> null
-                }
+                selectCache(library, dir.child(getCachedLibraryName(library)))
             }
         }
 
@@ -71,5 +81,11 @@ internal class CachedLibraries(
             Cache.Kind.STATIC -> false
             Cache.Kind.DYNAMIC -> true
         }
+    }
+
+    companion object {
+        fun getCachedLibraryName(library: KotlinLibrary): String = getCachedLibraryName(library.uniqueName)
+        fun getCachedLibraryName(libraryName: String): String = "$libraryName-cache"
+        const val BITCODE_DEPENDENCIES_FILE_NAME = "bitcode_deps"
     }
 }

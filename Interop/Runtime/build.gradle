@@ -23,7 +23,7 @@ buildscript {
     apply from: "$rootBuildDirectory/gradle/kotlinGradlePlugin.gradle"
 
     dependencies {
-        classpath "org.jetbrains.kotlin:kotlin-stdlib:$buildKotlinVersion"
+        classpath "org.jetbrains.kotlin:kotlin-stdlib:$kotlinVersion"
         classpath "org.jetbrains.kotlin:kotlin-native-shared:$konanVersion"
     }
 }
@@ -66,7 +66,8 @@ repositories {
 }
 
 dependencies {
-    compile "org.jetbrains.kotlin:kotlin-stdlib:$buildKotlinVersion"
+    compile project(":utilities:basic-utils")
+    compile "org.jetbrains.kotlin:kotlin-stdlib:$kotlinVersion"
     compile "org.jetbrains.kotlin:kotlin-reflect:$kotlinVersion"
 }
 
@@ -74,7 +75,9 @@ sourceSets.main.kotlin.srcDirs += "src/jvm/kotlin"
 
 compileKotlin {
     kotlinOptions {
-        freeCompilerArgs = ['-Xuse-experimental=kotlin.ExperimentalUnsignedTypes', "-XXLanguage:+InlineClasses"]
+        freeCompilerArgs = ['-Xuse-experimental=kotlin.ExperimentalUnsignedTypes', '-Xuse-experimental=kotlin.Experimental',
+                            '-Xopt-in=kotlin.RequiresOptIn', "-XXLanguage:+InlineClasses"]
+        allWarningsAsErrors=true
     }
 }
 

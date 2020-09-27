@@ -9,7 +9,7 @@ package kotlin.collections
  * A generic unordered collection of elements that does not support duplicate elements.
  * Methods in this interface support only read-only access to the set;
  * read/write access is supported through the [MutableSet] interface.
- * @param E the type of elements contained in the set. The set is covariant on its element type.
+ * @param E the type of elements contained in the set. The set is covariant in its element type.
  */
 public interface Set<out E> : Collection<E> {
     // Query Operations
@@ -26,7 +26,7 @@ public interface Set<out E> : Collection<E> {
 /**
  * A generic unordered collection of elements that does not support duplicate elements, and supports
  * adding and removing elements.
- * @param E the type of elements contained in the set. The mutable set is invariant on its element type.
+ * @param E the type of elements contained in the set. The mutable set is invariant in its element type.
  */
 public interface MutableSet<E> : Set<E>, MutableCollection<E> {
     // Query Operations
@@ -50,9 +50,3 @@ public interface MutableSet<E> : Set<E>, MutableCollection<E> {
     override fun retainAll(elements: Collection<E>): Boolean
     override fun clear(): Unit
 }
-
-// TODO: Add SingletonSet class
-/**
- * Returns an immutable set containing only the specified object [element].
- */
-public fun <T> setOf(element: T): Set<T> = hashSetOf(element)

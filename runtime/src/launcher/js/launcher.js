@@ -129,6 +129,11 @@ let konan_dependencies = {
             fromString(utf8encode(readline() + '\n'), str);
             return str;
         },
+        read: function (file, str, size) {
+            let string = utf8encode(readline() + '\n');
+            fromString(string.substring(0, size), str);
+            return string.length;
+        },
         Konan_notify_memory_grow: function() {
             heap = new Uint8Array(instance.exports.memory.buffer);
         },
@@ -159,6 +164,9 @@ let konan_dependencies = {
             // TODO: There is no writeErr() in d8.
             // Approximate it with write() to stdout for now.
             runtime.write(utf8decode(toString(str)));
+        },
+        fflush: function(file) {
+            runtime.flush();
         }
     }
 };

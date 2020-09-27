@@ -23,6 +23,7 @@ import org.gradle.api.Task
 import org.gradle.api.artifacts.Configuration
 import org.gradle.api.file.FileCollection
 import org.gradle.api.internal.AbstractNamedDomainObjectContainer
+import org.gradle.api.internal.CollectionCallbackActionDecorator
 import org.gradle.api.internal.file.AbstractFileCollection
 import org.gradle.api.tasks.JavaExec
 import org.gradle.api.tasks.SourceSet
@@ -203,6 +204,8 @@ class NamedNativeInteropConfig implements Named {
                     new File(project.findProject(":Interop:Indexer").buildDir, "nativelibs"),
                     new File(project.findProject(":Interop:Runtime").buildDir, "nativelibs")
             ).asPath
+            // Set the konan.home property because we run the cinterop tool not from a distribution jar
+            // so it will not be able to determine this path by itself.
             systemProperties "konan.home": project.rootProject.projectDir
             environment "LIBCLANG_DISABLE_CRASH_RECOVERY": "1"
 
@@ -224,6 +227,9 @@ class NamedNativeInteropConfig implements Named {
                 args '-natives', nativeLibsDir
                 args '-Xtemporary-files-dir', temporaryFilesDir
                 args '-flavor', this.flavor
+                if (flavor == "jvm") {
+                    args '-mode', 'sourcecode'
+                }
                 // Uncomment to debug.
                 // args '-verbose', 'true'
 
@@ -266,7 +272,7 @@ class NativeInteropExtension extends AbstractNamedDomainObjectContainer<NamedNat
     private String flavor = 'jvm'
 
     protected NativeInteropExtension(Project project) {
-        super(NamedNativeInteropConfig, project.gradle.services.get(Instantiator))
+        super(NamedNativeInteropConfig, project.gradle.services.get(Instantiator), project.gradle.services.get(CollectionCallbackActionDecorator))
         this.project = project
     }
 
@@ -302,16 +308,6 @@ class NativeInteropPlugin implements Plugin<Project> {
         prj.dependencies {
             interopStubGenerator project(path: ":Interop:StubGenerator")
             interopStubGenerator project(path: ":endorsedLibraries:kotlinx.cli", configuration: "jvmRuntimeElements")
-        }
-
-        // FIXME: choose tasks more wisely
-        prj.tasks.withType(JavaExec) {
-            if (!name.endsWith("InteropStubs")) {
-                systemProperties "java.library.path": prj.files(
-                        nativeLibsDir,
-                        runtimeNativeLibsDir
-                ).asPath
-            }
         }
     }
 }

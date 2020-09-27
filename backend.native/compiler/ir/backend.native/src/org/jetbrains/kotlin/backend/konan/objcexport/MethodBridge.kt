@@ -35,7 +35,7 @@ internal object MethodBridgeSelector : MethodBridgeParameter()
 internal sealed class MethodBridgeValueParameter : MethodBridgeParameter() {
     data class Mapped(val bridge: TypeBridge) : MethodBridgeValueParameter()
     object ErrorOutParameter : MethodBridgeValueParameter()
-    data class KotlinResultOutParameter(val bridge: TypeBridge) : MethodBridgeValueParameter()
+    object SuspendCompletion : MethodBridgeValueParameter()
 }
 
 internal data class MethodBridge(
@@ -55,8 +55,10 @@ internal data class MethodBridge(
 
         sealed class WithError : ReturnValue() {
             object Success : WithError()
-            data class RefOrNull(val successBridge: ReturnValue) : WithError()
+            data class ZeroForError(val successBridge: ReturnValue, val successMayBeZero: Boolean) : WithError()
         }
+
+        object Suspend : ReturnValue()
     }
 
     val paramBridges: List<MethodBridgeParameter> =
@@ -69,6 +71,9 @@ internal data class MethodBridge(
 
         MethodBridgeReceiver.Instance -> true
     }
+
+    val returnsError: Boolean
+        get() = returnBridge is ReturnValue.WithError
 }
 
 internal fun MethodBridge.valueParametersAssociated(
@@ -87,8 +92,8 @@ internal fun MethodBridge.valueParametersAssociated(
         when (it) {
             is MethodBridgeValueParameter.Mapped -> it to kotlinParameters.next()
 
-            is MethodBridgeValueParameter.ErrorOutParameter,
-            is MethodBridgeValueParameter.KotlinResultOutParameter -> it to null
+            MethodBridgeValueParameter.SuspendCompletion,
+            is MethodBridgeValueParameter.ErrorOutParameter -> it to null
         }
     }.also { assert(!kotlinParameters.hasNext()) }
 }
@@ -103,8 +108,8 @@ internal fun MethodBridge.parametersAssociated(
             is MethodBridgeValueParameter.Mapped, MethodBridgeReceiver.Instance ->
                 it to kotlinParameters.next()
 
-            MethodBridgeReceiver.Static, MethodBridgeSelector, MethodBridgeValueParameter.ErrorOutParameter,
-            is MethodBridgeValueParameter.KotlinResultOutParameter ->
+            MethodBridgeValueParameter.SuspendCompletion,
+            MethodBridgeReceiver.Static, MethodBridgeSelector, MethodBridgeValueParameter.ErrorOutParameter ->
                 it to null
 
             MethodBridgeReceiver.Factory -> {

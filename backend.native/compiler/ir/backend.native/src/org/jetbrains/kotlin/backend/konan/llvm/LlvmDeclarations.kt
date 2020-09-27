@@ -67,10 +67,9 @@ internal class ClassLlvmDeclarations(
         val singletonDeclarations: SingletonLlvmDeclarations?,
         val objCDeclarations: KotlinObjCClassLlvmDeclarations?)
 
-internal class SingletonLlvmDeclarations(val instanceFieldRef: LLVMValueRef, val instanceShadowFieldRef: LLVMValueRef?)
+internal class SingletonLlvmDeclarations(val instanceStorage: AddressAccess)
 
 internal class KotlinObjCClassLlvmDeclarations(
-        val classPointerGlobal: StaticData.Global,
         val classInfoGlobal: StaticData.Global,
         val bodyOffsetGlobal: StaticData.Global
 )
@@ -79,7 +78,7 @@ internal class FunctionLlvmDeclarations(val llvmFunction: LLVMValueRef)
 
 internal class FieldLlvmDeclarations(val index: Int, val classBodyType: LLVMTypeRef)
 
-internal class StaticFieldLlvmDeclarations(val storage: LLVMValueRef)
+internal class StaticFieldLlvmDeclarations(val storageAddressAccess: AddressAccess)
 
 internal class UniqueLlvmDeclarations(val pointer: ConstPointer)
 
@@ -89,7 +88,11 @@ private fun ContextUtils.createClassBodyType(name: String, fields: List<IrField>
 
     val classType = LLVMStructCreateNamed(LLVMGetModuleContext(context.llvmModule), name)!!
 
-    LLVMStructSetBody(classType, fieldTypes.toCValues(), fieldTypes.size, 0)
+    // LLVMStructSetBody expects the struct to be properly aligned and will insert padding accordingly. In our case
+    // `allocInstance` returns 16x + 8 address, i.e. always misaligned for vector types. Workaround is to use packed struct.
+    val hasBigAlignment = fields.any { LLVMABIAlignmentOfType(context.llvm.runtime.targetData, getLLVMType(it.type)) > 8 }
+    val packed = if (hasBigAlignment) 1 else 0
+    LLVMStructSetBody(classType, fieldTypes.toCValues(), fieldTypes.size, packed)
 
     return classType
 }
@@ -153,8 +156,9 @@ private class DeclarationsGeneratorVisitor(override val context: Context) :
     }
 
     override fun visitClass(declaration: IrClass) {
-        this.classes[declaration] = createClassDeclarations(declaration)
-
+        if (declaration.requiresRtti()) {
+            this.classes[declaration] = createClassDeclarations(declaration)
+        }
         super.visitClass(declaration)
     }
 
@@ -258,54 +262,47 @@ private class DeclarationsGeneratorVisitor(override val context: Context) :
     }
 
     private fun createSingletonDeclarations(irClass: IrClass): SingletonLlvmDeclarations? {
-
         if (irClass.isUnit()) {
             return null
         }
 
+        val storageKind = irClass.storageKind(context)
+        val threadLocal = storageKind == ObjectStorageKind.THREAD_LOCAL
         val isExported = irClass.isExported()
         val symbolName = if (isExported) {
-            irClass.objectInstanceFieldSymbolName
+            irClass.globalObjectStorageSymbolName
         } else {
             "kobjref:" + qualifyInternalName(irClass)
         }
-        val threadLocal = !(irClass.objectIsShared && context.config.threadsAreAllowed)
-        val instanceFieldRef = addGlobal(
-                symbolName, getLLVMType(irClass.defaultType), isExported = isExported, threadLocal = threadLocal)
+        val instanceAddress = if (threadLocal) {
+            addKotlinThreadLocal(symbolName, getLLVMType(irClass.defaultType))
+        } else {
+            addKotlinGlobal(symbolName, getLLVMType(irClass.defaultType), isExported)
+        }
 
-        LLVMSetInitializer(instanceFieldRef, kNullObjHeaderPtr)
-
-        val instanceShadowFieldRef =
-                if (threadLocal) null
-                else {
-                    val shadowSymbolName = if (isExported) {
-                        irClass.objectInstanceShadowFieldSymbolName
-                    } else {
-                        "kshadowobjref:" + qualifyInternalName(irClass)
-                    }
-                    addGlobal(shadowSymbolName, getLLVMType(irClass.defaultType), isExported = isExported, threadLocal = true)
-                }
-
-        instanceShadowFieldRef?.let { LLVMSetInitializer(it, kNullObjHeaderPtr) }
-
-        return SingletonLlvmDeclarations(instanceFieldRef, instanceShadowFieldRef)
+        return SingletonLlvmDeclarations(instanceAddress)
     }
 
     private fun createKotlinObjCClassDeclarations(irClass: IrClass): KotlinObjCClassLlvmDeclarations {
         val internalName = qualifyInternalName(irClass)
 
-        val classPointerGlobal = staticData.createGlobal(int8TypePtr, "kobjcclassptr:$internalName")
-
+        val isExported = irClass.isExported()
+        val classInfoSymbolName = if (isExported) {
+            irClass.kotlinObjCClassInfoSymbolName
+        } else {
+            "kobjcclassinfo:$internalName"
+        }
         val classInfoGlobal = staticData.createGlobal(
                 context.llvm.runtime.kotlinObjCClassInfo,
-                "kobjcclassinfo:$internalName"
+                classInfoSymbolName,
+                isExported = isExported
         ).apply {
             setConstant(true)
         }
 
         val bodyOffsetGlobal = staticData.createGlobal(int32Type, "kobjcbodyoffs:$internalName")
 
-        return KotlinObjCClassLlvmDeclarations(classPointerGlobal, classInfoGlobal, bodyOffsetGlobal)
+        return KotlinObjCClassLlvmDeclarations(classInfoGlobal, bodyOffsetGlobal)
     }
 
     override fun visitField(declaration: IrField) {
@@ -313,6 +310,7 @@ private class DeclarationsGeneratorVisitor(override val context: Context) :
 
         val containingClass = declaration.parent as? IrClass
         if (containingClass != null) {
+            if (!containingClass.requiresRtti()) return
             val classDeclarations = this.classes[containingClass] ?:
                 error(containingClass.descriptor.toString())
             val allFields = context.getLayoutBuilder(containingClass).fields
@@ -323,9 +321,11 @@ private class DeclarationsGeneratorVisitor(override val context: Context) :
         } else {
             // Fields are module-private, so we use internal name:
             val name = "kvar:" + qualifyInternalName(declaration)
-            val storage = addGlobal(
-                    name, getLLVMType(declaration.type), isExported = false,
-                    threadLocal = declaration.storageClass == FieldStorage.THREAD_LOCAL)
+            val storage = if (declaration.storageKind == FieldStorageKind.THREAD_LOCAL) {
+                addKotlinThreadLocal(name, getLLVMType(declaration.type))
+            } else {
+                addKotlinGlobal(name, getLLVMType(declaration.type), isExported = false)
+            }
 
             this.staticFields[declaration] = StaticFieldLlvmDeclarations(storage)
         }
@@ -344,6 +344,9 @@ private class DeclarationsGeneratorVisitor(override val context: Context) :
 
         val llvmFunction = if (declaration.isExternal) {
             if (declaration.isTypedIntrinsic || declaration.isObjCBridgeBased()
+                    // All call-sites to external accessors to interop properties
+                    // are lowered by InteropLowering.
+                    || (declaration.isAccessor && declaration.isFromMetadataInteropLibrary())
                     || declaration.annotations.hasAnnotation(RuntimeNames.cCall)) return
 
             context.llvm.externalFunction(declaration.symbolName, llvmFunctionType,
